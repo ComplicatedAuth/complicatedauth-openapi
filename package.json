@@ -1,0 +1,14 @@
+{
+  "name": "@complicatedauth/openapi",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "lint": "redocly lint openapi.yaml",
+    "check:docs": "node ./scripts/check-documentation.mjs",
+    "bundle": "redocly bundle openapi.yaml -o dist/openapi.yaml"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.45.0",
+    "yaml": "^2.9.0"
+  }
+}

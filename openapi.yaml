@@ -1,0 +1,886 @@
+openapi: 3.0.3
+info:
+  title: ComplicatedAuth API
+  version: 1.0.0
+  description: Control-plane and relying-party backend API for ComplicatedAuth.
+servers:
+  - url: /api
+    description: Same-origin console proxy
+  - url: http://localhost:8080
+    description: Direct local backend
+tags:
+  - name: Console authentication
+    description: Tenant Member signup, login, logout, and session discovery for the management console.
+  - name: Projects
+    description: Tenant-scoped authentication boundaries and their relying-party configuration.
+  - name: Origins
+    description: Exact browser origins permitted to perform WebAuthn ceremonies for a Project.
+  - name: API keys
+    description: Backend-only Project credentials used by relying-party servers.
+  - name: Project users
+    description: Application identities that exist only inside one Project.
+  - name: Activity
+    description: Immutable, cursor-paginated security audit events.
+  - name: Runtime
+    description: Server-to-server authentication, enrollment, session, and biometric operations for Project Users.
+  - name: Health
+    description: Unauthenticated process liveness and dependency readiness probes.
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: live
+      security: []
+      summary: Check whether the API process is running
+      description: Returns success when the HTTP process can serve requests. This probe does not check PostgreSQL or external providers.
+      responses:
+        '200': {description: Process is live}
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: ready
+      security: []
+      summary: Check whether the API and database are ready
+      description: Returns success only when the API can reach its required database dependency; use it for traffic readiness.
+      responses:
+        '200': {description: Database is reachable}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/signup:
+    post:
+      tags: [Console authentication]
+      operationId: signup
+      summary: Create a Tenant and its owner
+      description: Atomically creates a Tenant, its first owner Tenant Member, and an authenticated console session. The response sets the HttpOnly console cookie.
+      security: []
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SignupRequest'}
+      responses:
+        '201':
+          description: Tenant, owner, and session created
+          headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/login:
+    post:
+      tags: [Console authentication]
+      operationId: login
+      summary: Sign in a Tenant Member
+      description: Verifies management-console credentials and starts an HttpOnly console session. Repeated failures are rate limited.
+      security: []
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}
+      responses:
+        '200':
+          description: Authenticated
+          headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/logout:
+    post:
+      tags: [Console authentication]
+      operationId: logout
+      summary: Sign out a Tenant Member
+      description: Revokes the current console session and clears its cookie. State-changing console requests must include the browser Origin header.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Session revoked and cookie cleared}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/session:
+    get:
+      tags: [Console authentication]
+      operationId: getConsoleSession
+      summary: Get the current console session
+      description: Returns the authenticated Tenant and Tenant Member represented by the console cookie.
+      responses:
+        '200': {description: Active session, content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/projects:
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      summary: List Projects
+      description: Lists the Projects visible to the current Tenant Member using opaque cursor pagination.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Projects, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a Project
+      description: Creates an isolated authentication boundary with its relying-party identity and first exact allowed origin.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateProjectRequest'}}}
+      responses:
+        '201': {description: Project created, content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Get a Project
+      description: Returns Project configuration and current aggregate counts for the authenticated Tenant.
+      responses:
+        '200': {description: Project, content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Projects]
+      operationId: updateProject
+      summary: Update a Project
+      description: Updates supplied Project fields. The RP ID cannot change after the first FIDO credential has been registered.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateProjectRequest'}}}
+      responses:
+        '200': {description: Project updated, content: {application/json: {schema: {$ref: '#/components/schemas/Project'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/origins:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    get:
+      tags: [Origins]
+      operationId: listOrigins
+      summary: List allowed origins
+      description: Lists the exact browser origins accepted for WebAuthn ceremonies in this Project.
+      responses:
+        '200': {description: Allowed origins, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/Origin'}}}}}}}
+    post:
+      tags: [Origins]
+      operationId: createOrigin
+      summary: Add an allowed origin
+      description: Adds an exact HTTPS origin, or an HTTP localhost origin for development, to the Project allowlist.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateOriginRequest'}}}
+      responses:
+        '201': {description: Origin created, content: {application/json: {schema: {$ref: '#/components/schemas/Origin'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/origins/{origin_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/OriginUid'}]
+    delete:
+      tags: [Origins]
+      operationId: deleteOrigin
+      summary: Remove an allowed origin
+      description: Removes an origin from the Project. The final remaining origin cannot be deleted.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Origin deleted}
+        '409': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/api-keys:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    get:
+      tags: [API keys]
+      operationId: listApiKeys
+      summary: List Project API keys
+      description: Lists key metadata and prefixes without returning any reusable secret value.
+      responses:
+        '200': {description: Keys without secrets, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ApiKey'}}}}}}}
+    post:
+      tags: [API keys]
+      operationId: createApiKey
+      summary: Create a Project API key
+      description: Creates a backend credential and returns its secret exactly once. Store the secret in a server-side secret manager.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/NameRequest'}}}
+      responses:
+        '201': {description: Key and one-time secret, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeySecret'}}}}
+  /v1/projects/{project_uid}/api-keys/{key_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/KeyUid'}]
+    patch:
+      tags: [API keys]
+      operationId: renameApiKey
+      summary: Rename a Project API key
+      description: Changes the human-readable key name without changing its credential material.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/NameRequest'}}}
+      responses:
+        '200': {description: Key renamed, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKey'}}}}
+    delete:
+      tags: [API keys]
+      operationId: revokeApiKey
+      summary: Revoke a Project API key
+      description: Permanently invalidates the key for all future runtime requests.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Key revoked}
+  /v1/projects/{project_uid}/api-keys/{key_uid}/rotate:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/KeyUid'}]
+    post:
+      tags: [API keys]
+      operationId: rotateApiKey
+      summary: Rotate a Project API key
+      description: Invalidates the current secret and returns a replacement secret exactly once.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '200': {description: New one-time secret, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeySecret'}}}}
+  /v1/projects/{project_uid}/users:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    get:
+      tags: [Project users]
+      operationId: listProjectUsers
+      summary: List Project Users
+      description: Lists application identities in one Project. Either a console session or that Project's API key may authorize the request.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Users, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserPage'}}}}
+    post:
+      tags: [Project users]
+      operationId: createProjectUser
+      summary: Create a Project User
+      description: Provisions an identity scoped to this Project. The same email address may represent a different identity in another Project.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateProjectUserRequest'}}}
+      responses:
+        '201': {description: User created, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUser'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/users/{user_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/UserUid'}]
+    get:
+      tags: [Project users]
+      operationId: getProjectUser
+      summary: Get a Project User
+      description: Returns account state and the metadata for enrolled passkeys or security keys, never credential secrets.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      responses:
+        '200': {description: User with enrolled passkeys, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUser'}}}}
+    patch:
+      tags: [Project users]
+      operationId: updateProjectUser
+      summary: Update a Project User
+      description: Updates supplied identity, verification, or lifecycle fields inside this Project.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateProjectUserRequest'}}}
+      responses:
+        '200': {description: User updated, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUser'}}}}
+  /v1/projects/{project_uid}/users/{user_uid}/password:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/UserUid'}]
+    put:
+      tags: [Project users]
+      operationId: replaceProjectUserPassword
+      summary: Replace a Project User password
+      description: Sets a new password and revokes every active session for the Project User.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PasswordRequest'}}}
+      responses:
+        '204': {description: Password replaced and sessions revoked}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/users/{user_uid}/sessions/revoke:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/UserUid'}]
+    post:
+      tags: [Project users]
+      operationId: revokeProjectUserSessions
+      summary: Revoke all Project User sessions
+      description: Invalidates all active session references for the selected Project User.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      responses:
+        '204': {description: Sessions revoked}
+  /v1/projects/{project_uid}/users/{user_uid}/passkeys/{credential_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/UserUid'}, {$ref: '#/components/parameters/CredentialUid'}]
+    delete:
+      tags: [Project users]
+      operationId: deletePasskey
+      summary: Remove a Project User FIDO credential
+      description: Deletes the selected passkey or security key. A previously locked Project RP ID remains locked.
+      security: [{consoleSession: []}, {projectApiKey: []}]
+      responses:
+        '204': {description: Passkey removed; RP ID remains locked}
+  /v1/projects/{project_uid}/activity:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    get:
+      tags: [Activity]
+      operationId: listProjectActivity
+      summary: List Project activity
+      description: Returns security audit events scoped to one Project using opaque cursor pagination.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Project activity, content: {application/json: {schema: {$ref: '#/components/schemas/AuditPage'}}}}
+  /v1/activity:
+    get:
+      tags: [Activity]
+      operationId: listTenantActivity
+      summary: List Tenant activity
+      description: Returns security audit events across the authenticated Tenant using opaque cursor pagination.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Tenant activity, content: {application/json: {schema: {$ref: '#/components/schemas/AuditPage'}}}}
+  /v1/projects/{project_uid}/runtime/login/start:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    post:
+      tags: [Runtime]
+      operationId: startProjectUserLogin
+      summary: Start a Project User login
+      description: Creates a short-lived, non-enumerating login attempt and returns an opaque reference for subsequent factor checks.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/StartLoginRequest'}}}
+      responses:
+        '201': {description: Non-enumerating login attempt, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/LoginAttemptSecret'}}}}
+        '429': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/login/password:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: verifyProjectUserLoginPassword
+      summary: Verify the password factor
+      description: Verifies the password against the referenced login attempt without issuing a session. A second factor or first-FIDO enrollment must follow.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PasswordRequest'}}}
+      responses:
+        '200': {description: Password factor verified, content: {application/json: {schema: {$ref: '#/components/schemas/FactorVerified'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/login/fido/options:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: beginProjectUserFidoLogin
+      summary: Begin FIDO login
+      description: Starts a WebAuthn assertion ceremony for a password-verified login attempt and requested FIDO mode.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoModeRequest'}}}
+      responses:
+        '200': {description: Ceremony and browser options, content: {application/json: {schema: {$ref: '#/components/schemas/WebAuthnOptions'}}}}
+  /v1/projects/{project_uid}/runtime/login/fido/verify:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: finishProjectUserFidoLogin
+      summary: Finish FIDO login
+      description: Verifies the browser assertion for the referenced ceremony and returns an opaque Project User session reference.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
+      responses:
+        '200': {description: Authenticated session reference, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserSessionSecret'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/login/fido/enrollment/options:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: beginFirstFidoEnrollment
+      summary: Begin first-factor enrollment after password verification
+      description: Starts the one permitted bootstrap registration when the password-verified Project User has no FIDO credentials.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoEnrollmentModeRequest'}}}
+      responses:
+        '200': {description: Ceremony and browser registration options, content: {application/json: {schema: {$ref: '#/components/schemas/WebAuthnOptions'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/login/fido/enrollment/verify:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: finishFirstFidoEnrollment
+      summary: Enroll the first FIDO credential and complete login
+      description: Verifies the bootstrap registration, permanently locks the Project RP ID, stores the credential, and issues a session reference.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
+      responses:
+        '200': {description: Credential enrolled and authenticated session reference issued, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserSessionSecret'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/login/biometric:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
+    post:
+      tags: [Runtime]
+      operationId: verifyProjectUserBiometricLogin
+      summary: Verify a biometric login factor
+      description: Sends a selfie to the configured biometric provider for a password-verified login attempt and returns a session reference on a successful match.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: {$ref: '#/components/schemas/SelfieRequest'}
+      responses:
+        '200': {description: Authenticated session reference, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserSessionSecret'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/fido/registration/options:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectSession'}]
+    post:
+      tags: [Runtime]
+      operationId: beginFidoEnrollment
+      summary: Begin additional FIDO enrollment
+      description: Starts a WebAuthn registration ceremony for an already authenticated Project User session.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoEnrollmentModeRequest'}}}
+      responses:
+        '200': {description: Ceremony and browser options, content: {application/json: {schema: {$ref: '#/components/schemas/WebAuthnOptions'}}}}
+  /v1/projects/{project_uid}/runtime/fido/registration/verify:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectSession'}]
+    post:
+      tags: [Runtime]
+      operationId: finishFidoEnrollment
+      summary: Finish additional FIDO enrollment
+      description: Verifies and stores a passkey or security key created by the referenced registration ceremony.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
+      responses:
+        '201': {description: Registered credential, content: {application/json: {schema: {$ref: '#/components/schemas/FidoCredential'}}}}
+  /v1/projects/{project_uid}/runtime/biometric/enrollment:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectSession'}]
+    post:
+      tags: [Runtime]
+      operationId: enrollProjectUserBiometric
+      summary: Create or replace biometric enrollment
+      description: Enrolls the submitted selfie with the configured provider for the authenticated Project User session.
+      security: [{projectApiKey: []}]
+      requestBody:
+        required: true
+        content: {multipart/form-data: {schema: {$ref: '#/components/schemas/SelfieRequest'}}}
+      responses:
+        '201': {description: Facial enrollment created or replaced, content: {application/json: {schema: {$ref: '#/components/schemas/BiometricEnrollment'}}}}
+    delete:
+      tags: [Runtime]
+      operationId: deleteProjectUserBiometric
+      summary: Delete biometric enrollment
+      description: Removes the external biometric subject and local enrollment metadata for the authenticated Project User session.
+      security: [{projectApiKey: []}]
+      responses:
+        '204': {description: Facial enrollment removed}
+  /v1/projects/{project_uid}/runtime/sessions/introspect:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    post:
+      tags: [Runtime]
+      operationId: introspectProjectUserSession
+      summary: Introspect a Project User session
+      description: Validates an opaque session reference and returns the current Project User and expiry for backend authorization.
+      security: [{projectApiKey: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReferenceRequest'}}}}
+      responses:
+        '200': {description: Active session, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserSession'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/runtime/sessions/revoke:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}]
+    post:
+      tags: [Runtime]
+      operationId: revokeProjectUserSession
+      summary: Revoke a Project User session
+      description: Invalidates one opaque session reference, such as during relying-party logout.
+      security: [{projectApiKey: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReferenceRequest'}}}}
+      responses:
+        '204': {description: Session revoked}
+components:
+  securitySchemes:
+    consoleSession:
+      type: apiKey
+      in: cookie
+      name: complicatedauth_session
+      description: HttpOnly management-console session cookie issued to a Tenant Member.
+    projectApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: ComplicatedAuth project API key
+      description: Backend-only Project credential with a `ca_pk_` secret. Never expose it to browser code.
+  headers:
+    SetCookie:
+      description: HttpOnly console session cookie. Production deployments also set Secure and SameSite attributes.
+      schema: {type: string}
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: false
+      description: Browser origin checked on state-changing management-console requests. Required when the request is authorized by a console session.
+      schema: {type: string, format: uri}
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque cursor returned as `next_cursor` by the preceding page.
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      description: Maximum number of records to return.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    ProjectUid:
+      name: project_uid
+      in: path
+      required: true
+      description: Project authentication-boundary identifier.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    OriginUid:
+      name: origin_uid
+      in: path
+      required: true
+      description: Allowed-origin identifier inside the Project.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    KeyUid:
+      name: key_uid
+      in: path
+      required: true
+      description: Project API key identifier.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    UserUid:
+      name: user_uid
+      in: path
+      required: true
+      description: Project User identifier inside the Project.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    CredentialUid:
+      name: credential_uid
+      in: path
+      required: true
+      description: Enrolled FIDO credential identifier.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    ProjectSession:
+      name: X-ComplicatedAuth-Session
+      in: header
+      required: true
+      description: Opaque Project User session reference held only by the relying-party backend.
+      schema: {type: string}
+    ProjectLogin:
+      name: X-ComplicatedAuth-Login
+      in: header
+      required: true
+      description: Opaque, short-lived login-attempt reference held only by the relying-party backend.
+      schema: {type: string}
+  responses:
+    Error:
+      description: Request failed with a stable error code and request correlation identifier.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+  schemas:
+    Uuid:
+      description: RFC 4122 universally unique identifier.
+      type: string
+      format: uuid
+    Timestamp:
+      description: UTC timestamp serialized in RFC 3339 date-time form.
+      type: string
+      format: date-time
+    ErrorEnvelope:
+      description: Stable machine-readable error code, safe message, optional details, and request correlation identifier.
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, request_id]
+          properties:
+            code: {type: string}
+            message: {type: string}
+            details: {type: object, additionalProperties: true}
+            request_id: {type: string}
+    SignupRequest:
+      description: Tenant and first-owner fields accepted during management-console signup.
+      type: object
+      required: [email, password, display_name, tenant_name]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string, minLength: 12, maxLength: 128}
+        display_name: {type: string, minLength: 1, maxLength: 100}
+        tenant_name: {type: string, minLength: 1, maxLength: 100}
+    LoginRequest:
+      description: Tenant Member credentials accepted by management-console login.
+      type: object
+      required: [email, password]
+      properties:
+        email: {type: string, format: email}
+        password: {type: string}
+    Tenant:
+      description: Administrative owner boundary for Projects and Tenant Members.
+      type: object
+      required: [uid, name, slug]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        slug: {type: string}
+    TenantMember:
+      description: Human administrator authenticated to the management console.
+      type: object
+      required: [uid, email, display_name, role]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        email: {type: string, format: email}
+        display_name: {type: string}
+        role: {type: string, enum: [owner]}
+    ConsoleSession:
+      description: Authenticated management-console context returned after signup, login, or session discovery.
+      type: object
+      required: [tenant, member, expires_at]
+      properties:
+        tenant: {$ref: '#/components/schemas/Tenant'}
+        member: {$ref: '#/components/schemas/TenantMember'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    CreateProjectRequest:
+      description: Complete configuration required to create an isolated Project and its first allowed origin.
+      type: object
+      required: [name, environment, rp_id, rp_name, initial_origin]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        environment: {type: string, enum: [sandbox, production]}
+        rp_id: {type: string}
+        rp_name: {type: string, minLength: 1, maxLength: 120}
+        initial_origin: {type: string, format: uri}
+    UpdateProjectRequest:
+      description: Partial Project configuration update; omitted fields remain unchanged.
+      type: object
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        environment: {type: string, enum: [sandbox, production]}
+        status: {type: string, enum: [active, disabled]}
+        rp_id: {type: string}
+        rp_name: {type: string, minLength: 1, maxLength: 120}
+    Project:
+      description: Isolated relying-party authentication boundary and its current aggregate counts.
+      type: object
+      required: [uid, name, environment, status, rp_id, rp_name, rp_id_locked, origins, origin_count, user_count, api_key_count, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        environment: {type: string, enum: [sandbox, production]}
+        status: {type: string, enum: [active, disabled]}
+        rp_id: {type: string}
+        rp_name: {type: string}
+        rp_id_locked: {type: boolean}
+        origins: {type: array, items: {$ref: '#/components/schemas/Origin'}}
+        origin_count: {type: integer}
+        user_count: {type: integer}
+        api_key_count: {type: integer}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    ProjectPage:
+      description: Cursor-paginated collection of Projects.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Project'}}
+        next_cursor: {type: string, nullable: true}
+    CreateOriginRequest:
+      description: Exact browser origin to add to a Project allowlist.
+      type: object
+      required: [origin]
+      properties: {origin: {type: string, format: uri}}
+    Origin:
+      description: Exact browser origin permitted to perform ceremonies for a Project.
+      x-go-name: AllowedOrigin
+      type: object
+      required: [uid, origin, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        origin: {type: string, format: uri}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    NameRequest:
+      description: Human-readable name used when creating or renaming a Project API key.
+      type: object
+      required: [name]
+      properties: {name: {type: string, minLength: 1, maxLength: 100}}
+    ApiKey:
+      description: Project API key metadata that is safe to list; it never contains a reusable secret.
+      type: object
+      required: [uid, name, prefix, status, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        prefix: {type: string}
+        status: {type: string, enum: [active, revoked]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        last_used_at: {type: string, format: date-time, nullable: true}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    ApiKeySecret:
+      description: Project API key metadata plus the one-time secret returned only at creation or rotation.
+      allOf:
+        - {$ref: '#/components/schemas/ApiKey'}
+        - {type: object, required: [secret], properties: {secret: {type: string, writeOnly: true}}}
+    CreateProjectUserRequest:
+      description: Fields used to provision a Project-scoped application identity.
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+        email_verified: {type: boolean, default: false}
+        password: {type: string, minLength: 12, maxLength: 128}
+    UpdateProjectUserRequest:
+      description: Partial Project User update; omitted fields remain unchanged.
+      type: object
+      properties:
+        email: {type: string, format: email}
+        email_verified: {type: boolean}
+        status: {type: string, enum: [active, disabled]}
+    PasswordRequest:
+      description: Password value used for replacement or login-factor verification.
+      type: object
+      required: [password]
+      properties: {password: {type: string, minLength: 12, maxLength: 128}}
+    ProjectUser:
+      description: Application identity scoped to exactly one Project, with optional credential detail.
+      type: object
+      required: [uid, email, email_verified, status, passkey_count, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        email: {type: string, format: email}
+        email_verified: {type: boolean}
+        status: {type: string, enum: [active, disabled]}
+        passkey_count: {type: integer}
+        passkeys:
+          type: array
+          description: Present on the project-user detail response.
+          items: {$ref: '#/components/schemas/Passkey'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    ProjectUserPage:
+      description: Cursor-paginated collection of Project Users.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ProjectUser'}}
+        next_cursor: {type: string, nullable: true}
+    StartLoginRequest:
+      description: Email lookup used to create a deliberately non-enumerating login attempt.
+      type: object
+      required: [email]
+      properties: {email: {type: string, format: email}}
+    LoginAttemptSecret:
+      description: Short-lived opaque reference that binds all factor checks in one login attempt.
+      type: object
+      required: [login_reference, expires_at]
+      properties:
+        login_reference: {type: string, writeOnly: true}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    FactorVerified:
+      description: Confirmation that the password factor succeeded and the login attempt can continue.
+      type: object
+      required: [status, factor, expires_at]
+      properties:
+        status: {type: string, enum: [factor_verified]}
+        factor: {type: string, enum: [password]}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    FidoModeRequest:
+      description: Requested FIDO authenticator category for an assertion ceremony.
+      type: object
+      required: [mode]
+      properties: {mode: {type: string, enum: [passkey, security_key, hybrid]}}
+    FidoEnrollmentModeRequest:
+      description: Requested FIDO credential category for a registration ceremony.
+      type: object
+      required: [mode]
+      properties: {mode: {type: string, enum: [passkey, security_key]}}
+    FidoFinishRequest:
+      description: Browser WebAuthn result plus the FIDO mode selected when the ceremony began.
+      allOf:
+        - {$ref: '#/components/schemas/WebAuthnFinishRequest'}
+        - {$ref: '#/components/schemas/FidoModeRequest'}
+    SelfieRequest:
+      description: Multipart selfie image forwarded to the configured biometric provider.
+      type: object
+      required: [selfie]
+      properties: {selfie: {type: string, format: binary}}
+    ProjectUserSessionSecret:
+      description: Opaque session reference and Project User context returned only after complete authentication.
+      type: object
+      required: [session_reference, expires_at, project_user]
+      properties:
+        session_reference: {type: string, writeOnly: true}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        project_user: {$ref: '#/components/schemas/ProjectUser'}
+    SessionReferenceRequest:
+      description: Opaque Project User session reference submitted by a relying-party backend.
+      type: object
+      required: [session_reference]
+      properties: {session_reference: {type: string, writeOnly: true}}
+    ProjectUserSession:
+      description: Introspection result for an active Project User session.
+      type: object
+      required: [active, expires_at, project_user]
+      properties:
+        active: {type: boolean}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        project_user: {$ref: '#/components/schemas/ProjectUser'}
+    WebAuthnOptions:
+      description: Server ceremony identifier and browser-compatible PublicKeyCredential options.
+      type: object
+      required: [ceremony_uid, public_key]
+      properties:
+        ceremony_uid: {$ref: '#/components/schemas/Uuid'}
+        public_key: {type: object, additionalProperties: true}
+    WebAuthnFinishRequest:
+      description: Server ceremony identifier and browser-produced PublicKeyCredential result.
+      type: object
+      required: [ceremony_uid, credential]
+      properties:
+        ceremony_uid: {$ref: '#/components/schemas/Uuid'}
+        credential: {type: object, additionalProperties: true}
+    Passkey:
+      description: Minimal enrolled FIDO credential metadata exposed on Project User detail.
+      type: object
+      required: [uid, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    FidoCredential:
+      description: Newly registered passkey or attested security-key metadata.
+      type: object
+      required: [uid, kind, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        kind: {type: string, enum: [passkey, security_key]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    BiometricEnrollment:
+      description: Local metadata for the Project User's active biometric-provider enrollment.
+      type: object
+      required: [uid, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    AuditEvent:
+      description: Immutable security-relevant action with actor, optional target, metadata, and timestamp.
+      type: object
+      required: [uid, action, actor_type, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        action: {type: string}
+        actor_type: {type: string, enum: [tenant_member, project_user, api_key, system]}
+        actor_uid: {type: string, format: uuid, nullable: true}
+        target_type: {type: string, nullable: true}
+        target_uid: {type: string, format: uuid, nullable: true}
+        metadata: {type: object, additionalProperties: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    AuditPage:
+      description: Cursor-paginated collection of audit events.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/AuditEvent'}}
+        next_cursor: {type: string, nullable: true}
+security:
+  - consoleSession: []
