@@ -11,12 +11,22 @@ servers:
 tags:
   - name: Console authentication
     description: Tenant Member signup, login, logout, and session discovery for the management console.
+  - name: Tenant members
+    description: Tenant-scoped human membership, role administration, invitations, and management-session inventory.
+  - name: OAuth applications
+    description: Tenant-owned OAuth client registrations, exact redirect URIs, expiring client credentials, and Tenant Member grants.
+  - name: OAuth authorization
+    description: OAuth 2.0 authorization-code with S256 PKCE and OpenID Connect discovery, tokens, UserInfo, keys, and revocation.
+  - name: Delegated authorization
+    description: Tenant-owned Resource Servers, immutable delegated scope tokens, explicit OAuth Application grants, resource indicators, and token-derived authorization decisions.
   - name: Projects
     description: Tenant-scoped authentication boundaries and their relying-party configuration.
   - name: Origins
     description: Exact browser origins permitted to perform WebAuthn ceremonies for a Project.
-  - name: API keys
-    description: Backend-only Project credentials used by relying-party servers.
+  - name: Service accounts
+    description: Stable Project workload identities, their least-privilege scopes, and independently expiring backend credentials.
+  - name: Support cases
+    description: Tenant-owned customer questions, feedback, and bug reports with scoped Project intake, operator workflow, immutable correspondence, encrypted attachments, and generic external references.
   - name: Project users
     description: Application identities that exist only inside one Project.
   - name: Activity
@@ -45,12 +55,103 @@ paths:
       responses:
         '200': {description: Database is reachable}
         '503': {$ref: '#/components/responses/Error'}
+  /.well-known/openid-configuration:
+    get:
+      tags: [OAuth authorization]
+      operationId: getOpenIdConfiguration
+      security: []
+      summary: Discover OpenID Provider metadata
+      description: Returns the issuer and supported authorization-code, S256 PKCE, client-authentication, claims, token, UserInfo, revocation, and JWKS capabilities. The issuer is a runtime deployment origin and is never inferred from untrusted request headers.
+      responses:
+        '200':
+          description: OpenID Provider metadata
+          headers: {Cache-Control: {$ref: '#/components/headers/PublicMetadataCache'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/OpenIdConfiguration'}}}
+  /oauth/jwks:
+    get:
+      tags: [OAuth authorization]
+      operationId: getOAuthJwks
+      security: []
+      summary: Get OAuth token verification keys
+      description: Returns the active RSA public signing key and any retiring keys that remain necessary to verify unexpired tokens. Private key material is encrypted at rest and never appears here.
+      responses:
+        '200':
+          description: JSON Web Key Set
+          headers: {Cache-Control: {$ref: '#/components/headers/PublicMetadataCache'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/JsonWebKeySet'}}}
+        '503': {$ref: '#/components/responses/OAuthError'}
+  /oauth/authorize:
+    get:
+      tags: [OAuth authorization]
+      operationId: authorizeOAuthApplication
+      security: []
+      summary: Begin OAuth authorization code flow
+      description: Validates the active client and exact redirect URI before redirecting the browser to Tenant Member authentication and explicit consent. This provider profile requires state, nonce, and S256 PKCE. A delegated request supplies one exact registered resource indicator and only scopes explicitly granted to that client. Errors redirect only to a previously registered exact redirect URI; an untrusted client or redirect receives a local HTML error instead.
+      parameters:
+        - {name: response_type, in: query, required: true, description: OAuth response type; only code is supported., schema: {type: string, enum: [code]}}
+        - {name: client_id, in: query, required: true, description: Opaque identifier of an active OAuth Application., schema: {type: string}}
+        - {name: redirect_uri, in: query, required: true, description: Exact registered redirect URI; no wildcard or prefix matching occurs., schema: {type: string, format: uri}}
+        - {name: scope, in: query, required: true, description: Space-delimited OpenID scopes; openid is required., schema: {type: string}}
+        - {name: resource, in: query, required: false, description: Exact Resource Server identifier required when requesting delegated scopes. One authorization request targets at most one Resource Server., schema: {type: string, format: uri}}
+        - {name: state, in: query, required: true, description: Client-generated correlation and CSRF value returned unchanged., schema: {type: string, minLength: 1, maxLength: 1024}}
+        - {name: nonce, in: query, required: true, description: Client-generated replay value embedded in the ID token., schema: {type: string, minLength: 1, maxLength: 255}}
+        - {name: code_challenge, in: query, required: true, description: Base64url SHA-256 digest of the PKCE verifier., schema: {type: string, minLength: 43, maxLength: 43}}
+        - {name: code_challenge_method, in: query, required: true, description: PKCE transformation; only S256 is accepted., schema: {type: string, enum: [S256]}}
+        - {name: response_mode, in: query, required: false, description: Authorization response encoding; only query is supported., schema: {type: string, enum: [query]}}
+      responses:
+        '303':
+          description: Browser continues to the consent UI or returns an OAuth error to the trusted client
+          headers: {Location: {$ref: '#/components/headers/RedirectLocation'}}
+        '400': {description: Local HTML error because the client or redirect URI was not trusted}
+  /oauth/token:
+    post:
+      tags: [OAuth authorization]
+      operationId: exchangeOAuthAuthorizationCode
+      security: [{oauthClientSecret: []}, {}]
+      summary: Exchange an authorization code
+      description: Atomically consumes a five-minute authorization code bound to the client, exact redirect URI, S256 verifier, and optional Resource Server. Confidential clients authenticate with HTTP Basic; public clients send client_id and no secret. A successful response returns a short-lived JWT access token whose aud is either UserInfo or the exact resource indicator, plus an RS256 ID token. A response lost after consumption requires a new authorization flow.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/OAuthTokenRequest'}
+      responses:
+        '200': {description: Access and ID tokens, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthTokenResponse'}}}}
+        '400': {$ref: '#/components/responses/OAuthError'}
+        '401': {$ref: '#/components/responses/OAuthError'}
+        '503': {$ref: '#/components/responses/OAuthError'}
+  /oauth/userinfo:
+    get:
+      tags: [OAuth authorization]
+      operationId: getOAuthUserInfo
+      security: [{oauthAccessToken: []}]
+      summary: Get claims for an authorized Tenant Member
+      description: Resolves an active, unexpired, unrevoked access token and returns only claims authorized by its profile and email scopes. The subject is pairwise per OAuth Application.
+      responses:
+        '200': {description: Authorized OpenID claims, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthUserInfo'}}}}
+        '401': {$ref: '#/components/responses/OAuthError'}
+  /oauth/revoke:
+    post:
+      tags: [OAuth authorization]
+      operationId: revokeOAuthToken
+      security: [{oauthClientSecret: []}, {}]
+      summary: Revoke an OAuth access token
+      description: Authenticates the owning client and revokes its access token. Per RFC 7009, the endpoint returns success for unknown, already revoked, or wrong-client token values so it does not become a token oracle.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: '#/components/schemas/OAuthRevocationRequest'}
+      responses:
+        '200': {description: Revocation request processed}
+        '400': {$ref: '#/components/responses/OAuthError'}
+        '401': {$ref: '#/components/responses/OAuthError'}
   /v1/console/auth/signup:
     post:
       tags: [Console authentication]
       operationId: signup
       summary: Create a Tenant and its owner
-      description: Atomically creates a Tenant, its first owner Tenant Member, and an authenticated console session. The response sets the HttpOnly console cookie.
+      description: Atomically creates a Tenant, its first unverified owner Tenant Member, a bootstrap-only console session, and an asynchronous 24-hour email-verification delivery. The bootstrap cookie can enroll the first WebAuthn credential but cannot authorize ordinary management operations. Verification proves email ownership and is not an authentication factor.
       security: []
       parameters: [{$ref: '#/components/parameters/Origin'}]
       requestBody:
@@ -65,24 +166,168 @@ paths:
           content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
         '409': {$ref: '#/components/responses/Error'}
         '422': {$ref: '#/components/responses/Error'}
-  /v1/console/auth/login:
+  /v1/console/login-attempts:
     post:
       tags: [Console authentication]
-      operationId: login
-      summary: Sign in a Tenant Member
-      description: Verifies management-console credentials and starts an HttpOnly console session. Repeated failures are rate limited.
+      operationId: createTenantMemberLoginAttempt
+      summary: Start a Tenant Member login
+      description: Creates a five-minute, deliberately non-enumerating login resource. The one-time client secret is returned only here and must be held in memory, sent only in the dedicated header on this attempt's child operations, and excluded from logs. Creation never establishes a session.
       security: []
       parameters: [{$ref: '#/components/parameters/Origin'}]
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberLoginAttemptRequest'}}}
+      responses:
+        '201': {description: Non-enumerating login attempt, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberLoginAttempt'}}}}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/login-attempts/{login_attempt_uid}/password-verifications:
+    parameters: [{$ref: '#/components/parameters/LoginAttemptUid'}, {$ref: '#/components/parameters/LoginAttemptClientSecret'}]
+    post:
+      tags: [Console authentication]
+      operationId: verifyTenantMemberLoginPassword
+      security: []
+      summary: Verify the password factor
+      description: Verifies one password factor without issuing a session. Source-IP and keyed-identity limits are shared across replicas. A successful response states whether initial WebAuthn enrollment is required; invalid users, passwords, and disabled memberships receive the same error.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/PasswordRequest'}}}}
+      responses:
+        '201': {description: Password factor verified, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberLoginProgress'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/login-attempts/{login_attempt_uid}/webauthn-authentication-ceremonies:
+    parameters: [{$ref: '#/components/parameters/LoginAttemptUid'}, {$ref: '#/components/parameters/LoginAttemptClientSecret'}]
+    post:
+      tags: [Console authentication]
+      operationId: createTenantMemberWebAuthnAuthenticationCeremony
+      security: []
+      summary: Start Tenant Member WebAuthn authentication
+      description: Creates a single-use assertion ceremony after password verification. Passkey and hybrid modes select an enrolled passkey; security_key selects an enrolled cross-platform credential. User verification is required.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnModeRequest'}}}}
+      responses:
+        '201': {description: WebAuthn authentication ceremony, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCeremony'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/console/login-attempts/{login_attempt_uid}/webauthn-authentication-verifications:
+    parameters: [{$ref: '#/components/parameters/LoginAttemptUid'}, {$ref: '#/components/parameters/LoginAttemptClientSecret'}]
+    post:
+      tags: [Console authentication]
+      operationId: verifyTenantMemberWebAuthnAuthentication
+      security: []
+      summary: Complete Tenant Member WebAuthn authentication
+      description: Atomically consumes the assertion ceremony and login attempt, verifies the browser credential and signature counter, and creates a strong HttpOnly management session. Network retries cannot reuse either proof; after an ambiguous response, start a new login attempt.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnFinishRequest'}}}}
       responses:
         '200':
-          description: Authenticated
+          description: Strong management session created
           headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}
           content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
+        '400': {$ref: '#/components/responses/Error'}
         '401': {$ref: '#/components/responses/Error'}
-        '429': {$ref: '#/components/responses/Error'}
+  /v1/console/login-attempts/{login_attempt_uid}/webauthn-registration-ceremonies:
+    parameters: [{$ref: '#/components/parameters/LoginAttemptUid'}, {$ref: '#/components/parameters/LoginAttemptClientSecret'}]
+    post:
+      tags: [Console authentication]
+      operationId: createInitialTenantMemberWebAuthnRegistrationCeremony
+      security: []
+      summary: Start initial Tenant Member WebAuthn enrollment
+      description: Creates a registration ceremony only after password verification and only while the Tenant Member has no WebAuthn credential. Passkeys require discoverability and user verification; security keys additionally request direct attestation.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnRegistrationRequest'}}}}
+      responses:
+        '201': {description: Initial WebAuthn registration ceremony, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCeremony'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/console/login-attempts/{login_attempt_uid}/webauthn-registration-verifications:
+    parameters: [{$ref: '#/components/parameters/LoginAttemptUid'}, {$ref: '#/components/parameters/LoginAttemptClientSecret'}]
+    post:
+      tags: [Console authentication]
+      operationId: verifyInitialTenantMemberWebAuthnRegistration
+      security: []
+      summary: Complete initial Tenant Member WebAuthn enrollment
+      description: Atomically consumes the registration ceremony and login attempt, persists the first credential, and creates a strong HttpOnly management session. A concurrent first enrollment conflicts instead of silently creating multiple bootstrap credentials.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnFinishRequest'}}}}
+      responses:
+        '200':
+          description: First credential and strong management session created
+          headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/console/email-verification-requests:
+    post:
+      tags: [Console authentication]
+      operationId: createTenantEmailVerificationRequest
+      security: []
+      summary: Request Tenant Member email verification
+      description: Accepts an email address and, when it belongs to an active unverified Tenant Member, invalidates prior unused proofs and queues a new 24-hour one-time verification link. Known and unknown addresses receive the same response. Source-IP and normalized-identity limits are shared across replicas.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/EmailVerificationRequest'}}}
+      responses:
+        '202': {description: Request accepted without disclosing account existence, content: {application/json: {schema: {$ref: '#/components/schemas/AcceptedRequest'}}}}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/email-verifications:
+    post:
+      tags: [Console authentication]
+      operationId: verifyTenantMemberEmail
+      security: []
+      summary: Verify a Tenant Member email
+      description: Atomically consumes a 24-hour one-time proof and marks its active Tenant Member email as verified. Verification does not create a management session or act as an authentication factor.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CompleteEmailVerificationRequest'}}}
+      responses:
+        '204': {description: Email verified}
+        '400': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/password-reset-requests:
+    post:
+      tags: [Console authentication]
+      operationId: createTenantPasswordResetRequest
+      security: []
+      summary: Request a Tenant Member password reset
+      description: Accepts an email address and, when it belongs to an active Tenant Member, invalidates prior unused proofs and queues a new 30-minute one-time reset link. Known and unknown addresses receive the same response. Source-IP and normalized-identity limits are shared across replicas.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PasswordResetRequest'}}}
+      responses:
+        '202': {description: Request accepted without disclosing account existence, content: {application/json: {schema: {$ref: '#/components/schemas/AcceptedRequest'}}}}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/console/password-resets:
+    post:
+      tags: [Console authentication]
+      operationId: resetTenantMemberPassword
+      security: []
+      summary: Reset a Tenant Member password
+      description: Atomically consumes a 30-minute one-time proof, replaces the password, revokes all management sessions and server-tracked OAuth access tokens, consumes outstanding authorization codes and login attempts, and removes enrolled management WebAuthn credentials. This is the explicit lost-authenticator recovery boundary; the next password-verified login must enroll a new credential before management access is restored.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CompletePasswordResetRequest'}}}
+      responses:
+        '204': {description: Password reset and sessions revoked, headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/console/auth/logout:
     post:
       tags: [Console authentication]
@@ -98,10 +343,561 @@ paths:
       tags: [Console authentication]
       operationId: getConsoleSession
       summary: Get the current console session
-      description: Returns the authenticated Tenant and Tenant Member represented by the console cookie.
+      description: Returns the Tenant, Tenant Member, and authentication assurance represented by the console cookie. Bootstrap sessions may call this operation and WebAuthn registration operations, but ordinary management resources require strong assurance.
       responses:
         '200': {description: Active session, content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}}
         '401': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/sessions:
+    get:
+      tags: [Tenant members]
+      operationId: listTenantMemberSessions
+      summary: List the current Tenant Member's sessions
+      description: Lists active management-console sessions for the authenticated Tenant Member. The current cookie-backed session is identified without exposing any reusable session secret.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Active Tenant Member sessions, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberSessionPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/console/auth/sessions/{session_uid}:
+    parameters: [{$ref: '#/components/parameters/MemberSessionUid'}]
+    delete:
+      tags: [Tenant members]
+      operationId: revokeTenantMemberSession
+      summary: Revoke one management-console session
+      description: Revokes an active session owned by the authenticated Tenant Member. Revoking the current session also clears its browser cookie.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Session revoked}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/console/webauthn-credentials:
+    get:
+      tags: [Console authentication]
+      operationId: listTenantMemberWebAuthnCredentials
+      summary: List the current Tenant Member's WebAuthn credentials
+      description: Returns at most ten safe credential resources for the strongly authenticated Tenant Member. Authenticator IDs, public keys, counters, and ceremony data are never exposed.
+      responses:
+        '200': {description: WebAuthn credentials, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCredentialList'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+  /v1/console/webauthn-registration-ceremonies:
+    post:
+      tags: [Console authentication]
+      operationId: createTenantMemberWebAuthnRegistrationCeremony
+      summary: Start management WebAuthn credential enrollment
+      description: Creates a five-minute registration ceremony for the current Tenant Member. A bootstrap session may use it only to establish the first credential; a strong session may add a replacement before deleting an old credential. Already-enrolled credential identifiers are supplied in `excludeCredentials`, preventing the same authenticator from silently replacing a discoverable credential that the server still trusts. Ten credentials are allowed at most.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnRegistrationRequest'}}}}
+      responses:
+        '201': {description: WebAuthn registration ceremony, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCeremony'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/console/webauthn-registration-verifications:
+    post:
+      tags: [Console authentication]
+      operationId: verifyTenantMemberWebAuthnRegistration
+      summary: Complete management WebAuthn credential enrollment
+      description: Consumes a registration ceremony bound to the current cookie session and persists its credential. Completing the first credential upgrades a bootstrap session to strong assurance; later enrollment leaves the current strong session active.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnFinishRequest'}}}}
+      responses:
+        '201':
+          description: WebAuthn credential created
+          headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCredential'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/console/webauthn-credentials/{credential_uid}:
+    parameters: [{$ref: '#/components/parameters/TenantMemberWebAuthnCredentialUid'}]
+    patch:
+      tags: [Console authentication]
+      operationId: updateTenantMemberWebAuthnCredential
+      summary: Rename a management WebAuthn credential
+      description: Changes the human label using the latest strong ETag. Credential kind, attestation result, authenticator identity, and owner are immutable.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateTenantMemberWebAuthnCredentialRequest'}}}}
+      responses:
+        '200':
+          description: WebAuthn credential renamed
+          headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnCredential'}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Console authentication]
+      operationId: deleteTenantMemberWebAuthnCredential
+      summary: Delete a management WebAuthn credential
+      description: Deletes one credential with the latest strong ETag, revokes every other management session, and retains the current session. The final credential cannot be removed; enroll a replacement first. Lost-all-authenticator recovery uses the email password-reset flow.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: WebAuthn credential removed and other sessions revoked}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /v1/tenant/members:
+    get:
+      tags: [Tenant members]
+      operationId: listTenantMembers
+      summary: List Tenant Members
+      description: Lists human memberships inside the authenticated Tenant. All roles may read the collection; no credential or password material is returned.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Tenant Members, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/tenant/members/{member_uid}:
+    parameters: [{$ref: '#/components/parameters/MemberUid'}]
+    get:
+      tags: [Tenant members]
+      operationId: getTenantMember
+      summary: Get a Tenant Member
+      description: Returns one membership from the authenticated Tenant. A UUID from another Tenant is indistinguishable from a missing resource.
+      responses:
+        '200': {description: Tenant Member, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMember'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Tenant members]
+      operationId: updateTenantMember
+      summary: Update a Tenant Member's role or status
+      description: Owners may manage every membership; administrators may manage only non-owner memberships and cannot grant owner. Demotion, disablement, or removal can never leave the Tenant without an active owner. Disabling a member revokes all of their sessions.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateTenantMemberRequest'}}}
+      responses:
+        '200': {description: Updated Tenant Member, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMember'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Tenant members]
+      operationId: removeTenantMember
+      summary: Remove a Tenant Member
+      description: Permanently removes a different membership and its active sessions. Administrators cannot remove owners, the final active owner cannot be removed, and self-removal requires a future dedicated leave flow.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Tenant Member removed}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/tenant/invitations:
+    get:
+      tags: [Tenant members]
+      operationId: listTenantInvitations
+      summary: List Tenant invitations
+      description: Lists invitation metadata and computed expiry status without returning any acceptance token. Only owners and administrators may read this collection.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Tenant invitations, content: {application/json: {schema: {$ref: '#/components/schemas/TenantInvitationPage'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Tenant members]
+      operationId: createTenantInvitation
+      summary: Invite a Tenant Member
+      description: Creates a non-owner invitation and queues its seven-day one-time acceptance link to the invited email address. The acceptance proof is never returned to the administrator. The operation requires idempotency; an identical retry replays the exact safe response for 24 hours, changed inputs conflict, and a concurrent attempt returns idempotency_in_progress with Retry-After.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateTenantInvitationRequest'}}}
+      responses:
+        '201':
+          description: Invitation created and delivery queued
+          headers:
+            Location: {schema: {type: string}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/TenantInvitation'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/tenant/invitations/{invitation_uid}:
+    parameters: [{$ref: '#/components/parameters/InvitationUid'}]
+    delete:
+      tags: [Tenant members]
+      operationId: revokeTenantInvitation
+      summary: Revoke a pending Tenant invitation
+      description: Invalidates a pending, unexpired invitation while retaining its non-secret metadata and audit history. Accepted, revoked, expired, missing, and cross-Tenant invitations cannot be changed.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Invitation revoked}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+  /v1/tenant/invitations/{invitation_uid}/accept:
+    parameters: [{$ref: '#/components/parameters/InvitationUid'}]
+    post:
+      tags: [Tenant members]
+      operationId: acceptTenantInvitation
+      security: []
+      summary: Accept a Tenant invitation
+      description: Exchanges an unexpired one-time acceptance token for a verified Tenant Member and bootstrap-only management session. The token is consumed atomically. The new member must enroll a WebAuthn credential before ordinary management access; if the response is lost, start a password-verified login and complete initial enrollment instead of retrying the invitation indefinitely.
+      parameters:
+        - name: Origin
+          in: header
+          required: true
+          description: Exact management-console origin required for the unauthenticated browser submission.
+          schema: {type: string, format: uri}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AcceptTenantInvitationRequest'}}}
+      responses:
+        '201':
+          description: Invitation accepted and bootstrap session created
+          headers: {Set-Cookie: {$ref: '#/components/headers/SetCookie'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ConsoleSession'}}}
+        '401': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications:
+    get:
+      tags: [OAuth applications]
+      operationId: listOAuthApplications
+      summary: List OAuth Applications
+      description: Lists non-deleted OAuth client registrations owned by the authenticated Tenant. Client-secret values never appear in application representations.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: OAuth Applications, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplicationPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [OAuth applications]
+      operationId: createOAuthApplication
+      summary: Create an OAuth Application
+      description: Idempotently creates a public or confidential client with an opaque client ID and a canonical set of exact redirect URIs. The application type is immutable. Confidential client credentials are created separately so ordinary resource responses never mix metadata and one-time secrets.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateOAuthApplicationRequest'}}}}
+      responses:
+        '201':
+          description: OAuth Application created
+          headers:
+            Location: {$ref: '#/components/headers/ResourceLocation'}
+            ETag: {$ref: '#/components/headers/ResourceETag'}
+          content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplication'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications/{application_uid}:
+    parameters: [{$ref: '#/components/parameters/OAuthApplicationUid'}]
+    get:
+      tags: [OAuth applications]
+      operationId: getOAuthApplication
+      summary: Get an OAuth Application
+      description: Returns one non-deleted client registration from the authenticated Tenant and its strong version ETag.
+      responses:
+        '200':
+          description: OAuth Application
+          headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplication'}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [OAuth applications]
+      operationId: updateOAuthApplication
+      summary: Update an OAuth Application
+      description: Changes the name, active status, or complete exact redirect-URI set only when If-Match equals the current strong ETag. Disabling an application immediately revokes its server-tracked access tokens; already issued offline-validated JWTs remain bounded by their short expiry.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateOAuthApplicationRequest'}}}}
+      responses:
+        '200':
+          description: Updated OAuth Application
+          headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplication'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [OAuth applications]
+      operationId: deleteOAuthApplication
+      summary: Delete an OAuth Application
+      description: Tombstones the registration only when If-Match is current, permanently reserves its client ID, and revokes its client secrets and server-tracked access tokens. Deleted clients no longer authorize or exchange codes.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: OAuth Application deleted and credentials revoked}
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications/{application_uid}/client-secrets:
+    parameters: [{$ref: '#/components/parameters/OAuthApplicationUid'}]
+    get:
+      tags: [OAuth applications]
+      operationId: listOAuthClientSecrets
+      summary: List OAuth client secrets
+      description: Lists safe prefixes, status, expiry, and usage metadata for a confidential OAuth Application. Reusable secret values never appear.
+      responses:
+        '200': {description: Client-secret metadata, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthClientSecretList'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [OAuth applications]
+      operationId: createOAuthClientSecret
+      summary: Create an OAuth client secret
+      description: Idempotently creates an expiring credential for a confidential client and returns its value only in this response and exact 24-hour replays. At most two unexpired active secrets permit an overlap rotation window; public clients cannot have secrets.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateOAuthClientSecretRequest'}}}}
+      responses:
+        '201':
+          description: Client-secret metadata and one-time value
+          headers: {Location: {$ref: '#/components/headers/ResourceLocation'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/OAuthClientSecretSecret'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications/{application_uid}/client-secrets/{secret_uid}:
+    parameters: [{$ref: '#/components/parameters/OAuthApplicationUid'}, {$ref: '#/components/parameters/OAuthClientSecretUid'}]
+    delete:
+      tags: [OAuth applications]
+      operationId: revokeOAuthClientSecret
+      summary: Revoke an OAuth client secret
+      description: Idempotently changes the credential to revoked while retaining safe metadata and audit history. The reusable secret can no longer authenticate the client.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Client secret revoked}
+        '403': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/oauth/authorization-requests/inspect:
+    post:
+      tags: [OAuth authorization]
+      operationId: inspectOAuthAuthorizationRequest
+      summary: Inspect an OAuth consent request
+      description: Exchanges the browser-only, short-lived authorization request handle for safe client, redirect, scope, and expiry details. The authenticated Tenant Member must belong to the OAuth Application's Tenant.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/InspectOAuthAuthorizationRequest'}}}}
+      responses:
+        '200': {description: Safe consent details, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthAuthorizationRequest'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/oauth/authorization-requests/decision:
+    post:
+      tags: [OAuth authorization]
+      operationId: decideOAuthAuthorizationRequest
+      summary: Approve or deny an OAuth consent request
+      description: Idempotently consumes a pending authorization request. Approval persists exact consent, a stable pairwise subject, and a five-minute one-time code; denial returns access_denied. The response supplies the previously validated redirect target for browser navigation, and an exact retry returns the same code-bearing redirect.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthAuthorizationDecisionRequest'}}}}
+      responses:
+        '200': {description: Previously validated client redirect, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthAuthorizationDecision'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
+  /v1/oauth/consents:
+    get:
+      tags: [OAuth applications]
+      operationId: listOAuthConsents
+      summary: List the current Tenant Member's OAuth consents
+      description: Lists active and revoked grants made by the authenticated Tenant Member without token or authorization-code values.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: OAuth consent history, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthConsentPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+  /v1/oauth/consents/{consent_uid}:
+    parameters: [{$ref: '#/components/parameters/OAuthConsentUid'}]
+    delete:
+      tags: [OAuth applications]
+      operationId: revokeOAuthConsent
+      summary: Revoke the current Tenant Member's OAuth consent
+      description: Revokes the grant and every server-tracked access token for this member and application. A future authorization requires explicit approval again.
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: Consent and associated access tokens revoked}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/resource-servers:
+    get:
+      tags: [Delegated authorization]
+      operationId: listResourceServers
+      summary: List Resource Servers
+      description: Lists non-deleted API audiences owned by the authenticated Tenant. Audience identifiers are public protocol identifiers and never inferred from request hosts.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Resource Servers, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServerPage'}}}}
+        '401': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Delegated authorization]
+      operationId: createResourceServer
+      summary: Create a Resource Server
+      description: Idempotently registers one exact HTTPS audience identifier, or a localhost HTTP identifier for development. The identifier is immutable and remains reserved after deletion.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateResourceServerRequest'}}}}
+      responses:
+        '201':
+          description: Resource Server created
+          headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, ETag: {$ref: '#/components/headers/ResourceETag'}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServer'}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/resource-servers/{resource_server_uid}:
+    parameters: [{$ref: '#/components/parameters/ResourceServerUid'}]
+    get:
+      tags: [Delegated authorization]
+      operationId: getResourceServer
+      summary: Get a Resource Server
+      description: Returns one non-deleted Resource Server from the authenticated Tenant and its strong version ETag.
+      responses:
+        '200': {description: Resource Server, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServer'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Delegated authorization]
+      operationId: updateResourceServer
+      summary: Update a Resource Server
+      description: Changes display name or status only when If-Match is current. The audience identifier is immutable. Disabling revokes affected server-tracked access tokens and increments the policy version.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateResourceServerRequest'}}}}
+      responses:
+        '200': {description: Updated Resource Server, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServer'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Delegated authorization]
+      operationId: deleteResourceServer
+      summary: Delete a Resource Server
+      description: Tombstones the audience only when If-Match is current, permanently reserves its identifier, and revokes every server-tracked access token issued for it.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: Resource Server deleted and affected tokens revoked}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /v1/resource-servers/{resource_server_uid}/scopes:
+    parameters: [{$ref: '#/components/parameters/ResourceServerUid'}]
+    get:
+      tags: [Delegated authorization]
+      operationId: listResourceServerScopes
+      summary: List Resource Server scopes
+      description: Lists the current immutable scope tokens and mutable descriptions for one Tenant-owned Resource Server.
+      responses:
+        '200': {description: Resource Server scopes, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServerScopeList'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Delegated authorization]
+      operationId: createResourceServerScope
+      summary: Create a Resource Server scope
+      description: Idempotently registers an immutable lowercase scope token. OpenID names are reserved, and deleted scope names cannot be reused for a different meaning.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateResourceServerScopeRequest'}}}}
+      responses:
+        '201': {description: Resource Server scope created, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServerScope'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '404': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/resource-servers/{resource_server_uid}/scopes/{scope_uid}:
+    parameters: [{$ref: '#/components/parameters/ResourceServerUid'}, {$ref: '#/components/parameters/ResourceServerScopeUid'}]
+    get:
+      tags: [Delegated authorization]
+      operationId: getResourceServerScope
+      summary: Get a Resource Server scope
+      description: Returns one non-deleted scope and its strong version ETag without exposing grants or tokens.
+      responses:
+        '200': {description: Resource Server scope, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServerScope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Delegated authorization]
+      operationId: updateResourceServerScope
+      summary: Update a Resource Server scope
+      description: Changes the human description or status only when If-Match is current. The scope token is immutable. Disabling revokes affected server-tracked tokens.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateResourceServerScopeRequest'}}}}
+      responses:
+        '200': {description: Updated Resource Server scope, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ResourceServerScope'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Delegated authorization]
+      operationId: deleteResourceServerScope
+      summary: Delete a Resource Server scope
+      description: Tombstones the immutable scope token only when If-Match is current and revokes every server-tracked token carrying it for this Resource Server.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: Scope deleted and affected tokens revoked}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications/{application_uid}/grants:
+    parameters: [{$ref: '#/components/parameters/OAuthApplicationUid'}]
+    get:
+      tags: [Delegated authorization]
+      operationId: listOAuthApplicationGrants
+      summary: List an OAuth Application's Resource Server grants
+      description: Lists explicit Resource Server and delegated-scope assignments for one OAuth Application. User consent is separate and cannot expand these administrative grants.
+      responses:
+        '200': {description: OAuth Application grants, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplicationGrantList'}}}}
+    post:
+      tags: [Delegated authorization]
+      operationId: createOAuthApplicationGrant
+      summary: Grant an OAuth Application access to a Resource Server
+      description: Idempotently creates one relationship between an active client and active Resource Server with a non-empty subset of that server's active scopes. One live grant exists per client/audience pair.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateOAuthApplicationGrantRequest'}}}}
+      responses:
+        '201': {description: OAuth Application grant created, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplicationGrant'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/oauth/applications/{application_uid}/grants/{grant_uid}:
+    parameters: [{$ref: '#/components/parameters/OAuthApplicationUid'}, {$ref: '#/components/parameters/OAuthApplicationGrantUid'}]
+    get:
+      tags: [Delegated authorization]
+      operationId: getOAuthApplicationGrant
+      summary: Get an OAuth Application grant
+      description: Returns one non-deleted client/audience grant and its exact delegated-scope set with a strong version ETag.
+      responses:
+        '200': {description: OAuth Application grant, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplicationGrant'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Delegated authorization]
+      operationId: updateOAuthApplicationGrant
+      summary: Update an OAuth Application grant
+      description: Replaces the complete delegated-scope set or changes status only when If-Match is current. Any change revokes outstanding server-tracked tokens for this client/audience pair.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UpdateOAuthApplicationGrantRequest'}}}}
+      responses:
+        '200': {description: Updated OAuth Application grant, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/OAuthApplicationGrant'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Delegated authorization]
+      operationId: deleteOAuthApplicationGrant
+      summary: Delete an OAuth Application grant
+      description: Tombstones the client/audience relationship only when If-Match is current and revokes all affected server-tracked tokens. Re-authorization cannot exceed a future replacement grant.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: Grant deleted and affected tokens revoked}
+        '404': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '428': {$ref: '#/components/responses/Error'}
+  /v1/authorization/decisions:
+    post:
+      tags: [Delegated authorization]
+      operationId: createAuthorizationDecision
+      security: [{oauthAccessToken: []}]
+      summary: Evaluate one resource operation
+      description: Evaluates the baseline scope-v1 policy using only the active resource-bound token for Tenant, principal, audience, capabilities, policy version, and validity. The caller supplies an opaque resource and operation but cannot supply or override Tenant identity. A well-formed denial is a 200 decision with a stable denial_reason; invalid tokens receive 401.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateAuthorizationDecisionRequest'}}}}
+      responses:
+        '200': {description: Allowed or denied authorization decision, content: {application/json: {schema: {$ref: '#/components/schemas/AuthorizationDecision'}}}}
+        '401': {$ref: '#/components/responses/OAuthError'}
+        '422': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/projects:
     get:
       tags: [Projects]
@@ -181,65 +977,299 @@ paths:
         '204': {description: Origin deleted}
         '409': {$ref: '#/components/responses/Error'}
         '404': {$ref: '#/components/responses/Error'}
-  /v1/projects/{project_uid}/api-keys:
+  /v1/projects/{project_uid}/service-accounts:
     parameters: [{$ref: '#/components/parameters/ProjectUid'}]
     get:
-      tags: [API keys]
-      operationId: listApiKeys
-      summary: List Project API keys
-      description: Lists key metadata and prefixes without returning any reusable secret value.
+      tags: [Service accounts]
+      operationId: listServiceAccounts
+      summary: List Project service accounts
+      description: Lists stable workload identities for this Project. Reusable credential values are separate child resources and never appear here.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
       responses:
-        '200': {description: Keys without secrets, content: {application/json: {schema: {type: object, required: [items], properties: {items: {type: array, items: {$ref: '#/components/schemas/ApiKey'}}}}}}}
+        '200': {description: Project service accounts, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceAccountPage'}}}}
     post:
-      tags: [API keys]
-      operationId: createApiKey
-      summary: Create a Project API key
-      description: Creates a backend credential and returns its secret exactly once. Store the secret in a server-side secret manager.
-      parameters: [{$ref: '#/components/parameters/Origin'}]
+      tags: [Service accounts]
+      operationId: createServiceAccount
+      summary: Create a Project service account
+      description: Creates a stable workload identity with an explicit least-privilege scope set. Credential issuance is a separate operation so rotation can safely overlap versions.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/NameRequest'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateServiceAccountRequest'}}}
       responses:
-        '201': {description: Key and one-time secret, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeySecret'}}}}
-  /v1/projects/{project_uid}/api-keys/{key_uid}:
-    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/KeyUid'}]
+        '201': {description: Service account created, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceAccount'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/service-accounts/{service_account_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ServiceAccountUid'}]
+    get:
+      tags: [Service accounts]
+      operationId: getServiceAccount
+      summary: Get a Project service account
+      description: Returns one stable workload identity, its current effective scopes, environment, lifecycle, creator attribution, and concurrency version.
+      responses:
+        '200': {description: Service account, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceAccount'}}}}
+        '404': {$ref: '#/components/responses/Error'}
     patch:
-      tags: [API keys]
-      operationId: renameApiKey
-      summary: Rename a Project API key
-      description: Changes the human-readable key name without changing its credential material.
-      parameters: [{$ref: '#/components/parameters/Origin'}]
+      tags: [Service accounts]
+      operationId: updateServiceAccount
+      summary: Update a Project service account
+      description: Changes human metadata, scopes, or status using optimistic concurrency. Scope removal is effective on the next request. Disabling revokes all active credentials; later re-enabling requires a newly issued credential.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/NameRequest'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateServiceAccountRequest'}}}
       responses:
-        '200': {description: Key renamed, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKey'}}}}
+        '200': {description: Service account updated, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceAccount'}}}}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
     delete:
-      tags: [API keys]
-      operationId: revokeApiKey
-      summary: Revoke a Project API key
-      description: Permanently invalidates the key for all future runtime requests.
-      parameters: [{$ref: '#/components/parameters/Origin'}]
+      tags: [Service accounts]
+      operationId: deleteServiceAccount
+      summary: Delete a Project service account
+      description: Tombstones the workload identity and permanently revokes all of its active credentials. The current strong ETag is required.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
       responses:
-        '204': {description: Key revoked}
-  /v1/projects/{project_uid}/api-keys/{key_uid}/rotate:
-    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/KeyUid'}]
+        '204': {description: Service account deleted and credentials revoked}
+        '412': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/service-accounts/{service_account_uid}/credentials:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ServiceAccountUid'}]
+    get:
+      tags: [Service accounts]
+      operationId: listServiceCredentials
+      summary: List service-account credentials
+      description: Lists safe credential-version metadata in reverse creation order, including expiry, last use, fingerprint, creator, and revocation reason. Secret values are never returned. Continue with the opaque cursor instead of constructing one.
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Credential metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceCredentialList'}}}}
+        '404': {$ref: '#/components/responses/Error'}
     post:
-      tags: [API keys]
-      operationId: rotateApiKey
-      summary: Rotate a Project API key
-      description: Invalidates the current secret and returns a replacement secret exactly once.
+      tags: [Service accounts]
+      operationId: createServiceCredential
+      summary: Issue a service-account credential
+      description: Issues one expiring credential version and returns the reusable secret exactly once. Exact retries replay the same response for 24 hours. At most two active unexpired versions may overlap for deploy-then-revoke rotation.
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateServiceCredentialRequest'}}}
+      responses:
+        '201': {description: Credential and one-time secret, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceCredentialSecret'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/projects/{project_uid}/service-accounts/{service_account_uid}/credentials/{credential_uid}:
+    parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ServiceAccountUid'}, {$ref: '#/components/parameters/ServiceCredentialUid'}]
+    get:
+      tags: [Service accounts]
+      operationId: getServiceCredential
+      summary: Get a service-account credential
+      description: Returns safe metadata for one credential version. Expired is a derived terminal status; the reusable secret is never returned.
+      responses:
+        '200': {description: Credential metadata, content: {application/json: {schema: {$ref: '#/components/schemas/ServiceCredential'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Service accounts]
+      operationId: revokeServiceCredential
+      summary: Revoke a service-account credential
+      description: Idempotently and permanently invalidates one credential version. Other active versions under the same service account continue to work, enabling safe overlap rotation.
       parameters: [{$ref: '#/components/parameters/Origin'}]
       responses:
-        '200': {description: New one-time secret, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeySecret'}}}}
+        '204': {description: Credential is revoked}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/support/cases:
+    get:
+      tags: [Support cases]
+      operationId: listSupportCases
+      summary: List accessible Support Cases
+      description: Returns the Tenant-wide operator inbox for a console session, or only cases in the service credential's exact Project. Optional filters are conjunctive; the Project filter is available only to console operators. Results use reverse updated-time order and opaque cursor pagination.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters:
+        - {$ref: '#/components/parameters/Cursor'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {name: status, in: query, description: Exact Support Case lifecycle filter., schema: {$ref: '#/components/schemas/SupportCaseStatus'}}
+        - {name: category, in: query, description: Exact customer-intent category filter., schema: {$ref: '#/components/schemas/SupportCaseCategory'}}
+        - {name: project_uid, in: query, description: Console-only exact Project filter; service credentials are always confined to their own Project., schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '200': {description: Accessible Support Cases, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCasePage'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Support cases]
+      operationId: createSupportCase
+      summary: Create a Support Case
+      description: Creates a Tenant-owned case and immutable initial public message. A service credential is confined to its own Project and may attribute the report to a Project User in that Project. A console operator may create a Tenant-level case or select a Tenant-owned Project. Diagnostics are accepted only with explicit consent. Exact retries replay the same response for 24 hours.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSupportCaseRequest'}}}
+      responses:
+        '201': {description: Support Case created, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}, ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCase'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}]
+    get:
+      tags: [Support cases]
+      operationId: getSupportCase
+      summary: Get a Support Case
+      description: Returns one accessible case, its decrypted subject and consented diagnostic snapshot, aggregate correspondence counts, lifecycle timestamps, and current concurrency version. Service credentials cannot cross their persisted Project boundary.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      responses:
+        '200': {description: Support Case, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCase'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Support cases]
+      operationId: updateSupportCase
+      summary: Update a Support Case
+      description: Applies an optimistic-concurrency update. Tenant support operators may change subject, category, priority, assignment, or lifecycle state. A Project service credential may only close a case or reopen it to `open`. The documented state machine rejects invalid transitions; terminal cases must be reopened before adding content.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UpdateSupportCaseRequest'}}}
+      responses:
+        '200': {description: Support Case updated, headers: {ETag: {$ref: '#/components/headers/ResourceETag'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCase'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '412': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/messages:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}]
+    get:
+      tags: [Support cases]
+      operationId: listSupportCaseMessages
+      summary: List Support Case messages
+      description: Lists immutable correspondence in ascending creation order. Console operators receive public messages and internal notes; service credentials receive only public messages. Message bodies are decrypted only after Tenant and Project access checks.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Support Case messages, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseMessagePage'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Support cases]
+      operationId: createSupportCaseMessage
+      summary: Add a Support Case message
+      description: Appends one immutable message. Console operators may create public replies or internal notes; a service credential may create only a public message and may attribute it to a Project User in its Project. Resolved and closed cases must be explicitly reopened first. Exact retries replay the same result for 24 hours.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSupportCaseMessageRequest'}}}
+      responses:
+        '201': {description: Message created, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseMessage'}}}}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/attachments:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}]
+    get:
+      tags: [Support cases]
+      operationId: listSupportCaseAttachments
+      summary: List Support Case attachments
+      description: Lists encrypted attachment metadata in reverse creation order after case access checks. File bytes are available only from the separate no-store content operation.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Attachment metadata, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseAttachmentPage'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Support cases]
+      operationId: createSupportCaseAttachment
+      summary: Upload a Support Case attachment
+      description: Encrypts and stores one PNG, JPEG, WebP, PDF, UTF-8 text, or valid JSON file of at most 5 MiB. A case may retain at most 20 attachments and 25 MiB total. Service credentials may attribute the upload to a Project User in their Project. The content digest and metadata define exact idempotent replay for 24 hours.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreateSupportCaseAttachmentRequest'
+      responses:
+        '201': {description: Attachment stored, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseAttachment'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '413': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/attachments/{attachment_uid}:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}, {$ref: '#/components/parameters/SupportCaseAttachmentUid'}]
+    get:
+      tags: [Support cases]
+      operationId: getSupportCaseAttachment
+      summary: Get Support Case attachment metadata
+      description: Returns safe metadata and the decrypted filename for one accessible attachment, never its bytes.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      responses:
+        '200': {description: Attachment metadata, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseAttachment'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/attachments/{attachment_uid}/content:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}, {$ref: '#/components/parameters/SupportCaseAttachmentUid'}]
+    get:
+      tags: [Support cases]
+      operationId: downloadSupportCaseAttachment
+      summary: Download Support Case attachment content
+      description: Decrypts one accessible attachment and returns it with private no-store caching, attachment disposition, and content-sniffing disabled. Clients must still treat all customer files as untrusted.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      responses:
+        '200': {description: Decrypted attachment bytes, headers: {Cache-Control: {schema: {type: string, enum: ['private, no-store']}}, Content-Disposition: {schema: {type: string}}, X-Content-Type-Options: {schema: {type: string, enum: [nosniff]}}}, content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/events:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}]
+    get:
+      tags: [Support cases]
+      operationId: listSupportCaseEvents
+      summary: List immutable Support Case events
+      description: Lists the append-only lifecycle in ascending creation order. Service credentials receive only public events; console operators additionally receive internal assignment, priority, note, and external-reference activity. Event payloads never contain message bodies, filenames, file bytes, or external identifiers.
+      security: [{consoleSession: []}, {serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Support Case events, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseEventPage'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/external-references:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}]
+    get:
+      tags: [Support cases]
+      operationId: listSupportCaseExternalReferences
+      summary: List Support Case external references
+      description: Lists generic encrypted links to records in other systems for Tenant support operators. Project service credentials cannot access connector coordination metadata.
+      security: [{consoleSession: []}]
+      parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: External references, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseExternalReferencePage'}}}}
+        '404': {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Support cases]
+      operationId: createSupportCaseExternalReference
+      summary: Link an external Support Case record
+      description: Adds an immutable provider and encrypted external identifier, optional safe URL, and label. The generic resource does not assign connector-specific meaning. Provider plus external ID is unique per case; exact retries replay for 24 hours.
+      security: [{consoleSession: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CreateSupportCaseExternalReferenceRequest'}}}
+      responses:
+        '201': {description: External reference linked, headers: {Location: {$ref: '#/components/headers/ResourceLocation'}}, content: {application/json: {schema: {$ref: '#/components/schemas/SupportCaseExternalReference'}}}}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+  /v1/support/cases/{case_uid}/external-references/{external_reference_uid}:
+    parameters: [{$ref: '#/components/parameters/SupportCaseUid'}, {$ref: '#/components/parameters/SupportCaseExternalReferenceUid'}]
+    delete:
+      tags: [Support cases]
+      operationId: deleteSupportCaseExternalReference
+      summary: Unlink an external Support Case record
+      description: Idempotently removes one external link while preserving an immutable internal event and security audit record that omit the external identifier and URL.
+      security: [{consoleSession: []}]
+      parameters: [{$ref: '#/components/parameters/Origin'}]
+      responses:
+        '204': {description: External reference is absent}
+        '404': {$ref: '#/components/responses/Error'}
   /v1/projects/{project_uid}/users:
     parameters: [{$ref: '#/components/parameters/ProjectUid'}]
     get:
       tags: [Project users]
       operationId: listProjectUsers
       summary: List Project Users
-      description: Lists application identities in one Project. Either a console session or that Project's API key may authorize the request.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      description: Lists application identities in one Project. A console session or a service credential whose account grants `project_users.read` may authorize the request.
+      security: [{consoleSession: []}, {serviceCredential: []}]
       parameters: [{$ref: '#/components/parameters/Cursor'}, {$ref: '#/components/parameters/Limit'}]
       responses:
         '200': {description: Users, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserPage'}}}}
@@ -248,7 +1278,7 @@ paths:
       operationId: createProjectUser
       summary: Create a Project User
       description: Provisions an identity scoped to this Project. The same email address may represent a different identity in another Project.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/CreateProjectUserRequest'}}}
@@ -262,7 +1292,7 @@ paths:
       operationId: getProjectUser
       summary: Get a Project User
       description: Returns account state and the metadata for enrolled passkeys or security keys, never credential secrets.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       responses:
         '200': {description: User with enrolled passkeys, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUser'}}}}
     patch:
@@ -270,7 +1300,7 @@ paths:
       operationId: updateProjectUser
       summary: Update a Project User
       description: Updates supplied identity, verification, or lifecycle fields inside this Project.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       parameters: [{$ref: '#/components/parameters/Origin'}]
       requestBody:
         required: true
@@ -284,7 +1314,7 @@ paths:
       operationId: replaceProjectUserPassword
       summary: Replace a Project User password
       description: Sets a new password and revokes every active session for the Project User.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/PasswordRequest'}}}
@@ -298,7 +1328,7 @@ paths:
       operationId: revokeProjectUserSessions
       summary: Revoke all Project User sessions
       description: Invalidates all active session references for the selected Project User.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       responses:
         '204': {description: Sessions revoked}
   /v1/projects/{project_uid}/users/{user_uid}/passkeys/{credential_uid}:
@@ -308,7 +1338,7 @@ paths:
       operationId: deletePasskey
       summary: Remove a Project User FIDO credential
       description: Deletes the selected passkey or security key. A previously locked Project RP ID remains locked.
-      security: [{consoleSession: []}, {projectApiKey: []}]
+      security: [{consoleSession: []}, {serviceCredential: []}]
       responses:
         '204': {description: Passkey removed; RP ID remains locked}
   /v1/projects/{project_uid}/activity:
@@ -336,28 +1366,31 @@ paths:
       tags: [Runtime]
       operationId: startProjectUserLogin
       summary: Start a Project User login
-      description: Creates a short-lived, non-enumerating login attempt and returns an opaque reference for subsequent factor checks.
-      security: [{projectApiKey: []}]
+      description: Creates a short-lived, non-enumerating login attempt and returns an opaque reference for subsequent factor checks. A shared Project-and-source-IP policy limits creation across API replicas.
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/StartLoginRequest'}}}
       responses:
         '201': {description: Non-enumerating login attempt, headers: {Cache-Control: {schema: {type: string, enum: [no-store]}}}, content: {application/json: {schema: {$ref: '#/components/schemas/LoginAttemptSecret'}}}}
-        '429': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/projects/{project_uid}/runtime/login/password:
     parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
     post:
       tags: [Runtime]
       operationId: verifyProjectUserLoginPassword
       summary: Verify the password factor
-      description: Verifies the password against the referenced login attempt without issuing a session. A second factor or first-FIDO enrollment must follow.
-      security: [{projectApiKey: []}]
+      description: Verifies the password against the referenced login attempt without issuing a session. A second factor or first-FIDO enrollment must follow. Attempts share a Project-and-source-IP limit across API replicas.
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/PasswordRequest'}}}
       responses:
         '200': {description: Password factor verified, content: {application/json: {schema: {$ref: '#/components/schemas/FactorVerified'}}}}
         '401': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/projects/{project_uid}/runtime/login/fido/options:
     parameters: [{$ref: '#/components/parameters/ProjectUid'}, {$ref: '#/components/parameters/ProjectLogin'}]
     post:
@@ -365,7 +1398,7 @@ paths:
       operationId: beginProjectUserFidoLogin
       summary: Begin FIDO login
       description: Starts a WebAuthn assertion ceremony for a password-verified login attempt and requested FIDO mode.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoModeRequest'}}}
@@ -378,7 +1411,7 @@ paths:
       operationId: finishProjectUserFidoLogin
       summary: Finish FIDO login
       description: Verifies the browser assertion for the referenced ceremony and returns an opaque Project User session reference.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
@@ -392,7 +1425,7 @@ paths:
       operationId: beginFirstFidoEnrollment
       summary: Begin first-factor enrollment after password verification
       description: Starts the one permitted bootstrap registration when the password-verified Project User has no FIDO credentials.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoEnrollmentModeRequest'}}}
@@ -407,7 +1440,7 @@ paths:
       operationId: finishFirstFidoEnrollment
       summary: Enroll the first FIDO credential and complete login
       description: Verifies the bootstrap registration, permanently locks the Project RP ID, stores the credential, and issues a session reference.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
@@ -423,7 +1456,7 @@ paths:
       operationId: verifyProjectUserBiometricLogin
       summary: Verify a biometric login factor
       description: Sends a selfie to the configured biometric provider for a password-verified login attempt and returns a session reference on a successful match.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content:
@@ -438,8 +1471,8 @@ paths:
       tags: [Runtime]
       operationId: beginFidoEnrollment
       summary: Begin additional FIDO enrollment
-      description: Starts a WebAuthn registration ceremony for an already authenticated Project User session.
-      security: [{projectApiKey: []}]
+      description: Starts a WebAuthn registration ceremony for an already authenticated Project User session. Already-enrolled identifiers are supplied in `excludeCredentials`, preventing silent replacement of a discoverable credential that the server still trusts.
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoEnrollmentModeRequest'}}}
@@ -452,7 +1485,7 @@ paths:
       operationId: finishFidoEnrollment
       summary: Finish additional FIDO enrollment
       description: Verifies and stores a passkey or security key created by the referenced registration ceremony.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/FidoFinishRequest'}}}
@@ -465,7 +1498,7 @@ paths:
       operationId: enrollProjectUserBiometric
       summary: Create or replace biometric enrollment
       description: Enrolls the submitted selfie with the configured provider for the authenticated Project User session.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody:
         required: true
         content: {multipart/form-data: {schema: {$ref: '#/components/schemas/SelfieRequest'}}}
@@ -476,7 +1509,7 @@ paths:
       operationId: deleteProjectUserBiometric
       summary: Delete biometric enrollment
       description: Removes the external biometric subject and local enrollment metadata for the authenticated Project User session.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       responses:
         '204': {description: Facial enrollment removed}
   /v1/projects/{project_uid}/runtime/sessions/introspect:
@@ -486,7 +1519,7 @@ paths:
       operationId: introspectProjectUserSession
       summary: Introspect a Project User session
       description: Validates an opaque session reference and returns the current Project User and expiry for backend authorization.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReferenceRequest'}}}}
       responses:
         '200': {description: Active session, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectUserSession'}}}}
@@ -498,7 +1531,7 @@ paths:
       operationId: revokeProjectUserSession
       summary: Revoke a Project User session
       description: Invalidates one opaque session reference, such as during relying-party logout.
-      security: [{projectApiKey: []}]
+      security: [{serviceCredential: []}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReferenceRequest'}}}}
       responses:
         '204': {description: Session revoked}
@@ -509,21 +1542,42 @@ components:
       in: cookie
       name: complicatedauth_session
       description: HttpOnly management-console session cookie issued to a Tenant Member.
-    projectApiKey:
+    serviceCredential:
       type: http
       scheme: bearer
-      bearerFormat: ComplicatedAuth project API key
-      description: Backend-only Project credential with a `ca_pk_` secret. Never expose it to browser code.
+      bearerFormat: ComplicatedAuth service credential
+      description: Backend-only, expiring credential for a scoped Project service account. Sandbox secrets use `ca_sk_test_`; production secrets use `ca_sk_live_`. Never expose one to browser code.
+    oauthClientSecret:
+      type: http
+      scheme: basic
+      description: Confidential OAuth client authentication using client_id as the username and a one-time-issued client secret as the password. Public clients use the explicit unauthenticated alternative and send client_id in the form body.
+    oauthAccessToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT access token
+      description: Short-lived resource-bound OAuth access token issued by the authorization-code endpoint and checked against server-side revocation state.
   headers:
     SetCookie:
       description: HttpOnly console session cookie. Production deployments also set Secure and SameSite attributes.
       schema: {type: string}
+    PublicMetadataCache:
+      description: Public metadata cache policy; clients must still honor key rotation and refresh after this interval.
+      schema: {type: string, example: 'public, max-age=300'}
+    RedirectLocation:
+      description: Browser navigation target selected only after exact redirect validation.
+      schema: {type: string, format: uri}
+    ResourceLocation:
+      description: Relative location of the created resource.
+      schema: {type: string}
+    ResourceETag:
+      description: Strong quoted decimal representation version used for optimistic concurrency.
+      schema: {type: string, example: '"3"'}
   parameters:
     Origin:
       name: Origin
       in: header
-      required: false
-      description: Browser origin checked on state-changing management-console requests. Required when the request is authorized by a console session.
+      required: true
+      description: Exact configured management-console origin required on every state-changing browser request, including unauthenticated authentication ceremonies.
       schema: {type: string, format: uri}
     Cursor:
       name: cursor
@@ -535,6 +1589,90 @@ components:
       in: query
       description: Maximum number of records to return.
       schema: {type: integer, minimum: 1, maximum: 100, default: 25}
+    MemberUid:
+      name: member_uid
+      in: path
+      required: true
+      description: Tenant Member identifier scoped to the authenticated Tenant.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    InvitationUid:
+      name: invitation_uid
+      in: path
+      required: true
+      description: Tenant invitation identifier. Acceptance additionally requires its one-time token.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    MemberSessionUid:
+      name: session_uid
+      in: path
+      required: true
+      description: Management-console session identifier owned by the authenticated Tenant Member.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    LoginAttemptUid:
+      name: login_attempt_uid
+      in: path
+      required: true
+      description: Five-minute Tenant Member login-attempt identifier. It is not sufficient without the separately returned client secret.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    LoginAttemptClientSecret:
+      name: X-ComplicatedAuth-Login-Secret
+      in: header
+      required: true
+      description: One-time client secret returned only when the login attempt was created. Hold it in memory and exclude it from application, proxy, and analytics logs.
+      schema: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+    TenantMemberWebAuthnCredentialUid:
+      name: credential_uid
+      in: path
+      required: true
+      description: WebAuthn credential metadata identifier owned by the authenticated Tenant Member.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Opaque caller-generated key for one logical mutation. Reuse it only with identical inputs for documented retries; maximum length is 255 characters.
+      schema: {type: string, minLength: 1, maxLength: 255}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Strong ETag from the latest mutable resource representation. Weak, wildcard, multiple, and stale validators are rejected.
+      schema: {type: string, pattern: '^"[1-9][0-9]*"$'}
+    OAuthApplicationUid:
+      name: application_uid
+      in: path
+      required: true
+      description: OAuth Application identifier scoped to the authenticated Tenant.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    OAuthClientSecretUid:
+      name: secret_uid
+      in: path
+      required: true
+      description: Safe OAuth client-secret metadata identifier inside one OAuth Application.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    OAuthConsentUid:
+      name: consent_uid
+      in: path
+      required: true
+      description: OAuth consent identifier owned by the authenticated Tenant Member.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    ResourceServerUid:
+      name: resource_server_uid
+      in: path
+      required: true
+      description: Resource Server identifier scoped to the authenticated Tenant.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    ResourceServerScopeUid:
+      name: scope_uid
+      in: path
+      required: true
+      description: Immutable delegated-scope resource identifier inside one Resource Server.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    OAuthApplicationGrantUid:
+      name: grant_uid
+      in: path
+      required: true
+      description: OAuth Application to Resource Server grant identifier scoped to the authenticated Tenant.
+      schema: {$ref: '#/components/schemas/Uuid'}
     ProjectUid:
       name: project_uid
       in: path
@@ -547,11 +1685,35 @@ components:
       required: true
       description: Allowed-origin identifier inside the Project.
       schema: {$ref: '#/components/schemas/Uuid'}
-    KeyUid:
-      name: key_uid
+    ServiceAccountUid:
+      name: service_account_uid
       in: path
       required: true
-      description: Project API key identifier.
+      description: Stable workload-identity identifier inside the Project.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    ServiceCredentialUid:
+      name: credential_uid
+      in: path
+      required: true
+      description: Expiring service-account credential version identifier.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    SupportCaseUid:
+      name: case_uid
+      in: path
+      required: true
+      description: Support Case identifier constrained by the authenticated Tenant and, for a service credential, its exact Project.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    SupportCaseAttachmentUid:
+      name: attachment_uid
+      in: path
+      required: true
+      description: Encrypted attachment identifier inside one accessible Support Case.
+      schema: {$ref: '#/components/schemas/Uuid'}
+    SupportCaseExternalReferenceUid:
+      name: external_reference_uid
+      in: path
+      required: true
+      description: Generic external-record link identifier inside one Tenant-accessible Support Case.
       schema: {$ref: '#/components/schemas/Uuid'}
     UserUid:
       name: user_uid
@@ -581,6 +1743,16 @@ components:
     Error:
       description: Request failed with a stable error code and request correlation identifier.
       content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    RateLimited:
+      description: The caller exhausted a shared rate-limit policy and may retry after the indicated number of seconds.
+      headers:
+        Retry-After:
+          description: Whole seconds until the current rate-limit window resets.
+          schema: {type: integer, minimum: 1}
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    OAuthError:
+      description: OAuth-standard error response. Authorization-endpoint errors use trusted redirects after exact client validation; token, UserInfo, and revocation endpoints use this JSON shape.
+      content: {application/json: {schema: {$ref: '#/components/schemas/OAuthError'}}}
   schemas:
     Uuid:
       description: RFC 4122 universally unique identifier.
@@ -603,6 +1775,372 @@ components:
             message: {type: string}
             details: {type: object, additionalProperties: true}
             request_id: {type: string}
+    OAuthError:
+      description: RFC-style OAuth error code and a safe human-readable description; it deliberately does not expose the platform ErrorEnvelope.
+      type: object
+      required: [error, error_description]
+      properties:
+        error: {type: string}
+        error_description: {type: string}
+    OpenIdConfiguration:
+      description: OpenID Provider discovery metadata for the deployed immutable issuer origin and supported baseline profile.
+      type: object
+      required: [issuer, authorization_endpoint, token_endpoint, userinfo_endpoint, jwks_uri, revocation_endpoint, response_types_supported, grant_types_supported, subject_types_supported, id_token_signing_alg_values_supported, scopes_supported, code_challenge_methods_supported, token_endpoint_auth_methods_supported]
+      properties:
+        issuer: {type: string, format: uri}
+        authorization_endpoint: {type: string, format: uri}
+        token_endpoint: {type: string, format: uri}
+        userinfo_endpoint: {type: string, format: uri}
+        jwks_uri: {type: string, format: uri}
+        revocation_endpoint: {type: string, format: uri}
+        response_types_supported: {type: array, items: {type: string}}
+        grant_types_supported: {type: array, items: {type: string}}
+        subject_types_supported: {type: array, items: {type: string}}
+        id_token_signing_alg_values_supported: {type: array, items: {type: string}}
+        scopes_supported: {type: array, items: {type: string}}
+        code_challenge_methods_supported: {type: array, items: {type: string}}
+        token_endpoint_auth_methods_supported: {type: array, items: {type: string}}
+        claims_supported: {type: array, items: {type: string}}
+        request_parameter_supported: {type: boolean}
+        request_uri_parameter_supported: {type: boolean}
+        require_request_uri_registration: {type: boolean}
+        authorization_response_iss_parameter_supported: {type: boolean}
+    JsonWebKey:
+      description: RSA public verification key published for RS256 OAuth and OpenID Connect tokens.
+      type: object
+      required: [kty, use, alg, kid, n, e]
+      properties:
+        kty: {type: string, enum: [RSA]}
+        use: {type: string, enum: [sig]}
+        alg: {type: string, enum: [RS256]}
+        kid: {type: string}
+        n: {type: string, description: Base64url-encoded unsigned RSA modulus.}
+        e: {type: string, description: Base64url-encoded unsigned RSA public exponent.}
+    JsonWebKeySet:
+      description: Public active and still-valid retiring token verification keys.
+      type: object
+      required: [keys]
+      properties:
+        keys: {type: array, items: {$ref: '#/components/schemas/JsonWebKey'}}
+    OAuthApplicationType:
+      description: OAuth client confidentiality classification. Public clients never receive a secret; confidential clients authenticate from a trusted backend.
+      type: string
+      enum: [public, confidential]
+    OAuthApplication:
+      description: Tenant-owned OAuth client registration with immutable client type, exact redirects, and a monotonic concurrency version.
+      type: object
+      required: [uid, name, client_id, application_type, status, version, redirect_uris, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        client_id: {type: string}
+        application_type: {$ref: '#/components/schemas/OAuthApplicationType'}
+        status: {type: string, enum: [active, disabled]}
+        version: {type: integer, format: int64, minimum: 1}
+        redirect_uris: {type: array, minItems: 1, maxItems: 20, uniqueItems: true, items: {type: string, format: uri}}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    OAuthApplicationPage:
+      description: Cursor-paginated collection of non-deleted Tenant OAuth Applications.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/OAuthApplication'}}
+        next_cursor: {type: string, nullable: true}
+    CreateOAuthApplicationRequest:
+      description: Immutable client type, display name, and canonical exact redirect set used to register an OAuth Application.
+      type: object
+      required: [name, application_type, redirect_uris]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        application_type: {$ref: '#/components/schemas/OAuthApplicationType'}
+        redirect_uris: {type: array, minItems: 1, maxItems: 20, uniqueItems: true, items: {type: string, format: uri}}
+    UpdateOAuthApplicationRequest:
+      description: Partial OAuth Application update; at least one field is required and redirect_uris replaces the complete exact set.
+      type: object
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        status: {type: string, enum: [active, disabled]}
+        redirect_uris: {type: array, minItems: 1, maxItems: 20, uniqueItems: true, items: {type: string, format: uri}}
+    OAuthClientSecret:
+      description: Safe metadata for an expiring confidential-client credential; reusable secret material is absent.
+      type: object
+      required: [uid, name, prefix, status, created_at, expires_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        prefix: {type: string}
+        status: {type: string, enum: [active, revoked, expired]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        last_used_at: {type: string, format: date-time, nullable: true}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    OAuthClientSecretSecret:
+      description: Client-secret metadata plus the credential value returned only by idempotent creation and its exact replays.
+      allOf:
+        - {$ref: '#/components/schemas/OAuthClientSecret'}
+        - {type: object, required: [secret], properties: {secret: {type: string, writeOnly: true}}}
+    OAuthClientSecretList:
+      description: Complete safe client-secret metadata collection for one OAuth Application.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/OAuthClientSecret'}}
+    CreateOAuthClientSecretRequest:
+      description: Human-readable credential name and optional explicit expiry; omitted expiry defaults to 90 days.
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        expires_at: {type: string, format: date-time, description: Must be between five minutes and 365 days in the future.}
+    InspectOAuthAuthorizationRequest:
+      description: Browser-only opaque authorization request handle submitted from the consent page body rather than its HTTP request URL.
+      type: object
+      required: [request_token]
+      properties:
+        request_token: {type: string, minLength: 40, maxLength: 256, writeOnly: true}
+    OAuthAuthorizationRequest:
+      description: Safe client, redirect, scope, and expiry details displayed for explicit Tenant Member consent.
+      type: object
+      required: [application_uid, application_name, client_id, redirect_uri, scopes, scope_details, expires_at]
+      properties:
+        application_uid: {$ref: '#/components/schemas/Uuid'}
+        application_name: {type: string}
+        client_id: {type: string}
+        redirect_uri: {type: string, format: uri}
+        scopes: {type: array, items: {type: string}}
+        scope_details: {type: array, items: {$ref: '#/components/schemas/OAuthAuthorizationScope'}}
+        resource_server_uid: {type: string, format: uuid, nullable: true}
+        resource_server_name: {type: string, nullable: true}
+        resource_server_identifier: {type: string, format: uri, nullable: true}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    OAuthAuthorizationScope:
+      description: Safe human-facing consent metadata paired with one immutable protocol scope token.
+      type: object
+      required: [name, display_name, description]
+      properties:
+        name: {type: string}
+        display_name: {type: string}
+        description: {type: string}
+    OAuthAuthorizationDecisionRequest:
+      description: One-time authorization request proof and the Tenant Member's explicit decision.
+      type: object
+      required: [request_token, decision]
+      properties:
+        request_token: {type: string, minLength: 40, maxLength: 256, writeOnly: true}
+        decision: {type: string, enum: [approve, deny]}
+    OAuthAuthorizationDecision:
+      description: Previously validated exact redirect URI with code or OAuth error, state, and issuer parameters for browser navigation.
+      type: object
+      required: [redirect_to]
+      properties:
+        redirect_to: {type: string, format: uri}
+    OAuthTokenRequest:
+      description: Authorization-code exchange form. Confidential clients use HTTP Basic and omit client_id; public clients send client_id and no secret.
+      type: object
+      required: [grant_type, code, redirect_uri, code_verifier]
+      properties:
+        grant_type: {type: string, enum: [authorization_code]}
+        code: {type: string, writeOnly: true}
+        redirect_uri: {type: string, format: uri}
+        code_verifier: {type: string, minLength: 43, maxLength: 128, writeOnly: true}
+        client_id: {type: string}
+    OAuthTokenResponse:
+      description: Short-lived access token bound either to UserInfo or one exact Resource Server audience, plus an OpenID ID token issued for one consumed authorization code.
+      type: object
+      required: [access_token, token_type, expires_in, scope, id_token]
+      properties:
+        access_token: {type: string, writeOnly: true}
+        token_type: {type: string, enum: [Bearer]}
+        expires_in: {type: integer, format: int64, minimum: 1}
+        scope: {type: string}
+        id_token: {type: string, writeOnly: true}
+    OAuthRevocationRequest:
+      description: Access-token revocation form plus client_id for unauthenticated public-client revocation.
+      type: object
+      required: [token]
+      properties:
+        token: {type: string, writeOnly: true}
+        token_type_hint: {type: string, enum: [access_token]}
+        client_id: {type: string}
+    OAuthUserInfo:
+      description: Pairwise subject and only those profile or email claims included in the access token's granted scopes.
+      type: object
+      required: [sub]
+      properties:
+        sub: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        email_verified: {type: boolean}
+    OAuthConsent:
+      description: Tenant Member grant metadata for one OAuth Application and optional Resource Server; token values and authorization codes are never exposed.
+      type: object
+      required: [uid, application_uid, application_name, client_id, scopes, status, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        application_uid: {$ref: '#/components/schemas/Uuid'}
+        application_name: {type: string}
+        client_id: {type: string}
+        scopes: {type: array, items: {type: string}}
+        resource_server_uid: {type: string, format: uuid, nullable: true}
+        resource_server_name: {type: string, nullable: true}
+        resource_server_identifier: {type: string, format: uri, nullable: true}
+        status: {type: string, enum: [active, revoked]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    OAuthConsentPage:
+      description: Cursor-paginated OAuth consent history for the authenticated Tenant Member.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/OAuthConsent'}}
+        next_cursor: {type: string, nullable: true}
+    ResourceServer:
+      description: Tenant-owned OAuth resource audience with an immutable exact identifier, mutable status, resource version, and monotonic scope-policy version.
+      type: object
+      required: [uid, name, identifier, status, version, policy_version, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        identifier: {type: string, format: uri}
+        status: {type: string, enum: [active, disabled]}
+        version: {type: integer, format: int64, minimum: 1}
+        policy_version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    ResourceServerPage:
+      description: Cursor-paginated collection of non-deleted Tenant Resource Servers.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ResourceServer'}}
+        next_cursor: {type: string, nullable: true}
+    CreateResourceServerRequest:
+      description: Display name and immutable exact API audience identifier used to register a Resource Server.
+      type: object
+      required: [name, identifier]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        identifier: {type: string, format: uri, maxLength: 2048}
+    UpdateResourceServerRequest:
+      description: Partial Resource Server metadata update; the audience identifier is intentionally absent and immutable.
+      type: object
+      properties:
+        name: {type: string, minLength: 1, maxLength: 120}
+        status: {type: string, enum: [active, disabled]}
+    DelegatedScopeName:
+      description: Immutable lowercase capability token. OpenID scope names and offline_access are reserved.
+      type: string
+      minLength: 1
+      maxLength: 120
+      pattern: '^[a-z][a-z0-9._:-]{0,119}$'
+    ResourceServerScope:
+      description: Immutable delegated scope token with mutable human description, status, and optimistic-concurrency version.
+      type: object
+      required: [uid, name, display_name, description, status, version, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {$ref: '#/components/schemas/DelegatedScopeName'}
+        display_name: {type: string}
+        description: {type: string}
+        status: {type: string, enum: [active, disabled]}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    ResourceServerScopeList:
+      description: Complete non-deleted delegated-scope collection for one Resource Server.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ResourceServerScope'}}
+    CreateResourceServerScopeRequest:
+      description: Immutable scope token and human-facing consent description.
+      type: object
+      required: [name, display_name]
+      properties:
+        name: {$ref: '#/components/schemas/DelegatedScopeName'}
+        display_name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 500, default: ''}
+    UpdateResourceServerScopeRequest:
+      description: Partial scope metadata update; the protocol scope token is intentionally absent and immutable.
+      type: object
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 120}
+        description: {type: string, maxLength: 500}
+        status: {type: string, enum: [active, disabled]}
+    OAuthApplicationGrant:
+      description: Administrative upper bound on delegated scopes an OAuth Application may request for one Resource Server. Tenant Member consent can only narrow it.
+      type: object
+      required: [uid, application_uid, resource_server_uid, resource_server_name, resource_server_identifier, status, version, scopes, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        application_uid: {$ref: '#/components/schemas/Uuid'}
+        resource_server_uid: {$ref: '#/components/schemas/Uuid'}
+        resource_server_name: {type: string}
+        resource_server_identifier: {type: string, format: uri}
+        status: {type: string, enum: [active, disabled]}
+        version: {type: integer, format: int64, minimum: 1}
+        scopes: {type: array, minItems: 1, uniqueItems: true, items: {$ref: '#/components/schemas/DelegatedScopeName'}}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    OAuthApplicationGrantList:
+      description: Complete non-deleted Resource Server grants for one OAuth Application.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/OAuthApplicationGrant'}}
+    CreateOAuthApplicationGrantRequest:
+      description: Resource Server relationship and complete non-empty set of active scope resource identifiers.
+      type: object
+      required: [resource_server_uid, scope_uids]
+      properties:
+        resource_server_uid: {$ref: '#/components/schemas/Uuid'}
+        scope_uids: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    UpdateOAuthApplicationGrantRequest:
+      description: Partial grant update; scope_uids replaces the complete non-empty scope assignment.
+      type: object
+      properties:
+        status: {type: string, enum: [active, disabled]}
+        scope_uids: {type: array, minItems: 1, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    AuthorizationResource:
+      description: Opaque customer-resource identity interpreted by the Resource Server; ComplicatedAuth binds it to the token-derived Tenant but does not fetch customer data.
+      type: object
+      required: [type, id]
+      properties:
+        type: {type: string, minLength: 1, maxLength: 120}
+        id: {type: string, minLength: 1, maxLength: 500}
+    CreateAuthorizationDecisionRequest:
+      description: Resource, delegated operation, and bounded optional context. Tenant, principal, audience, and capabilities deliberately cannot be supplied.
+      type: object
+      required: [resource, operation]
+      properties:
+        resource: {$ref: '#/components/schemas/AuthorizationResource'}
+        operation: {$ref: '#/components/schemas/DelegatedScopeName'}
+        context: {type: object, maxProperties: 100, additionalProperties: true, description: Optional JSON context capped at 8 KiB by the server. The scope-v1 policy reserves it for forwards-compatible signals and does not use it to expand access.}
+    OAuthAuthorizationPrincipal:
+      description: Stable pairwise Tenant Member principal derived only from the verified OAuth access token.
+      type: object
+      required: [type, subject]
+      properties:
+        type: {type: string, enum: [tenant_member]}
+        subject: {type: string}
+    AuthorizationDecision:
+      description: Deterministic scope-v1 allow or deny result bounded by the active resource token, current administrative grant, scope catalog, policy version, and validity time.
+      type: object
+      required: [allowed, principal, tenant_uid, resource_server_uid, resource_server_identifier, resource, operation, capabilities, policy_version, valid_until, denial_reason]
+      properties:
+        allowed: {type: boolean}
+        principal: {$ref: '#/components/schemas/OAuthAuthorizationPrincipal'}
+        tenant_uid: {$ref: '#/components/schemas/Uuid'}
+        resource_server_uid: {$ref: '#/components/schemas/Uuid'}
+        resource_server_identifier: {type: string, format: uri}
+        resource: {$ref: '#/components/schemas/AuthorizationResource'}
+        operation: {$ref: '#/components/schemas/DelegatedScopeName'}
+        capabilities: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/DelegatedScopeName'}}
+        policy_version: {type: string, pattern: '^scope-v1:[1-9][0-9]*$'}
+        valid_until: {$ref: '#/components/schemas/Timestamp'}
+        denial_reason: {type: string, enum: [missing_capability, unknown_operation], nullable: true}
     SignupRequest:
       description: Tenant and first-owner fields accepted during management-console signup.
       type: object
@@ -612,13 +2150,113 @@ components:
         password: {type: string, minLength: 12, maxLength: 128}
         display_name: {type: string, minLength: 1, maxLength: 100}
         tenant_name: {type: string, minLength: 1, maxLength: 100}
-    LoginRequest:
-      description: Tenant Member credentials accepted by management-console login.
+    TenantMemberLoginAttemptRequest:
+      description: Email lookup used to create a deliberately non-enumerating management login attempt.
       type: object
-      required: [email, password]
+      required: [email]
       properties:
         email: {type: string, format: email}
-        password: {type: string}
+    TenantMemberLoginAttempt:
+      description: Five-minute management login resource with a client secret returned only in this creation response.
+      type: object
+      required: [uid, client_secret, expires_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        client_secret: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    TenantMemberLoginProgress:
+      description: Password-verification result that selects either existing-credential authentication or one-time first enrollment.
+      type: object
+      required: [status, credential_setup_required, expires_at]
+      properties:
+        status: {type: string, enum: [password_verified]}
+        credential_setup_required: {type: boolean}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    TenantMemberWebAuthnModeRequest:
+      description: WebAuthn assertion category selected for a password-verified management login.
+      type: object
+      required: [mode]
+      properties:
+        mode: {type: string, enum: [passkey, security_key, hybrid]}
+    TenantMemberWebAuthnRegistrationRequest:
+      description: Human label and authenticator category for a management WebAuthn credential.
+      type: object
+      required: [name, mode]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        mode: {type: string, enum: [passkey, security_key]}
+    TenantMemberWebAuthnCeremony:
+      description: Five-minute, single-use management WebAuthn ceremony and browser-compatible PublicKeyCredential options.
+      type: object
+      required: [uid, expires_at, public_key]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        public_key: {type: object, additionalProperties: true}
+    TenantMemberWebAuthnFinishRequest:
+      description: Browser-produced PublicKeyCredential result bound to the exact ceremony and requested authenticator category.
+      type: object
+      required: [mode, ceremony_uid, credential]
+      properties:
+        mode: {type: string, enum: [passkey, security_key, hybrid]}
+        ceremony_uid: {$ref: '#/components/schemas/Uuid'}
+        credential: {type: object, additionalProperties: true}
+    TenantMemberWebAuthnCredential:
+      description: Safe, versioned metadata for one management passkey or attested security key. Authenticator identifiers, public keys, and counters remain internal.
+      type: object
+      required: [uid, name, kind, attested, version, created_at, updated_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        kind: {type: string, enum: [passkey, security_key]}
+        attested: {type: boolean}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        last_used_at: {type: string, format: date-time, nullable: true}
+    TenantMemberWebAuthnCredentialList:
+      description: Complete, bounded collection of the current Tenant Member's management WebAuthn credentials.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, maxItems: 10, items: {$ref: '#/components/schemas/TenantMemberWebAuthnCredential'}}
+    UpdateTenantMemberWebAuthnCredentialRequest:
+      description: Replacement human label for an enrolled management WebAuthn credential.
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+    AcceptedRequest:
+      description: Generic acknowledgement used where revealing whether an account exists would create an enumeration oracle.
+      type: object
+      required: [accepted]
+      properties:
+        accepted: {type: boolean, enum: [true]}
+    EmailVerificationRequest:
+      description: Email lookup for a deliberately non-enumerating Tenant Member verification request.
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+    CompleteEmailVerificationRequest:
+      description: One-time email-ownership proof delivered out of band.
+      type: object
+      required: [token]
+      properties:
+        token: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+    PasswordResetRequest:
+      description: Email lookup for a deliberately non-enumerating Tenant Member password-reset request.
+      type: object
+      required: [email]
+      properties:
+        email: {type: string, format: email}
+    CompletePasswordResetRequest:
+      description: One-time reset proof and replacement password.
+      type: object
+      required: [token, password]
+      properties:
+        token: {type: string, minLength: 32, maxLength: 512, writeOnly: true}
+        password: {type: string, minLength: 12, maxLength: 128, writeOnly: true}
     Tenant:
       description: Administrative owner boundary for Projects and Tenant Members.
       type: object
@@ -628,22 +2266,100 @@ components:
         name: {type: string}
         slug: {type: string}
     TenantMember:
-      description: Human administrator authenticated to the management console.
+      description: Human membership authenticated to the management console and authorized by its Tenant role.
       type: object
-      required: [uid, email, display_name, role]
+      required: [uid, email, display_name, role, status, email_verified, created_at]
       properties:
         uid: {$ref: '#/components/schemas/Uuid'}
         email: {type: string, format: email}
         display_name: {type: string}
-        role: {type: string, enum: [owner]}
-    ConsoleSession:
-      description: Authenticated management-console context returned after signup, login, or session discovery.
+        role: {$ref: '#/components/schemas/TenantRole'}
+        status: {type: string, enum: [active, disabled]}
+        email_verified: {type: boolean}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    TenantRole:
+      description: Tenant authorization role. Owner and admin manage membership; developer manages Projects, credentials, and Project Users; support may read and revoke Project User sessions; viewer is read-only.
+      type: string
+      enum: [owner, admin, developer, support, viewer]
+    TenantMemberPage:
+      description: Cursor-paginated collection of Tenant Members.
       type: object
-      required: [tenant, member, expires_at]
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/TenantMember'}}
+        next_cursor: {type: string, nullable: true}
+    UpdateTenantMemberRequest:
+      description: Partial membership authorization or status change; at least one property is required by the operation.
+      type: object
+      properties:
+        role: {$ref: '#/components/schemas/TenantRole'}
+        status: {type: string, enum: [active, disabled]}
+    CreateTenantInvitationRequest:
+      description: Email and non-owner role used to create a Tenant invitation.
+      type: object
+      required: [email, role]
+      properties:
+        email: {type: string, format: email}
+        role: {type: string, enum: [admin, developer, support, viewer]}
+    AcceptTenantInvitationRequest:
+      description: One-time invitation proof and the profile credentials established by the new Tenant Member.
+      type: object
+      required: [acceptance_token, password, display_name]
+      properties:
+        acceptance_token: {type: string, writeOnly: true}
+        password: {type: string, minLength: 12, maxLength: 128, writeOnly: true}
+        display_name: {type: string, minLength: 1, maxLength: 100}
+    TenantInvitation:
+      description: Tenant membership invitation metadata. Expired is computed when a pending invitation passes its expiry timestamp.
+      type: object
+      required: [uid, email, role, status, created_at, expires_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        email: {type: string, format: email}
+        role: {type: string, enum: [admin, developer, support, viewer]}
+        status: {type: string, enum: [pending, accepted, revoked, expired]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+        accepted_at: {type: string, format: date-time, nullable: true}
+        revoked_at: {type: string, format: date-time, nullable: true}
+    TenantInvitationPage:
+      description: Cursor-paginated collection of Tenant invitation metadata without acceptance tokens.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/TenantInvitation'}}
+        next_cursor: {type: string, nullable: true}
+    TenantMemberSession:
+      description: Safe metadata for one active management-console session, including its current authentication assurance; no cookie or reusable reference is exposed.
+      type: object
+      required: [uid, current, authentication_assurance, created_at, last_seen_at, expires_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        current: {type: boolean}
+        authentication_assurance: {$ref: '#/components/schemas/AuthenticationAssurance'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        last_seen_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
+    TenantMemberSessionPage:
+      description: Cursor-paginated collection of active management-console sessions.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/TenantMemberSession'}}
+        next_cursor: {type: string, nullable: true}
+    ConsoleSession:
+      description: Cookie-backed management-console context. Bootstrap assurance authorizes only session discovery, logout, and first WebAuthn enrollment; strong assurance authorizes role-permitted management operations.
+      type: object
+      required: [tenant, member, authentication_assurance, expires_at]
       properties:
         tenant: {$ref: '#/components/schemas/Tenant'}
         member: {$ref: '#/components/schemas/TenantMember'}
+        authentication_assurance: {$ref: '#/components/schemas/AuthenticationAssurance'}
         expires_at: {$ref: '#/components/schemas/Timestamp'}
+    AuthenticationAssurance:
+      description: Bootstrap sessions may enroll the first management WebAuthn credential; strong sessions completed password plus user-verified WebAuthn authentication.
+      type: string
+      enum: [bootstrap, strong]
     CreateProjectRequest:
       description: Complete configuration required to create an isolated Project and its first allowed origin.
       type: object
@@ -666,7 +2382,7 @@ components:
     Project:
       description: Isolated relying-party authentication boundary and its current aggregate counts.
       type: object
-      required: [uid, name, environment, status, rp_id, rp_name, rp_id_locked, origins, origin_count, user_count, api_key_count, created_at]
+      required: [uid, name, environment, status, rp_id, rp_name, rp_id_locked, origins, origin_count, user_count, service_account_count, created_at]
       properties:
         uid: {$ref: '#/components/schemas/Uuid'}
         name: {type: string}
@@ -678,7 +2394,7 @@ components:
         origins: {type: array, items: {$ref: '#/components/schemas/Origin'}}
         origin_count: {type: integer}
         user_count: {type: integer}
-        api_key_count: {type: integer}
+        service_account_count: {type: integer}
         created_at: {$ref: '#/components/schemas/Timestamp'}
     ProjectPage:
       description: Cursor-paginated collection of Projects.
@@ -701,28 +2417,278 @@ components:
         uid: {$ref: '#/components/schemas/Uuid'}
         origin: {type: string, format: uri}
         created_at: {$ref: '#/components/schemas/Timestamp'}
-    NameRequest:
-      description: Human-readable name used when creating or renaming a Project API key.
+    CreateServiceAccountRequest:
+      description: Stable workload identity metadata and its complete initial least-privilege scope set.
       type: object
-      required: [name]
-      properties: {name: {type: string, minLength: 1, maxLength: 100}}
-    ApiKey:
-      description: Project API key metadata that is safe to list; it never contains a reusable secret.
+      required: [name, scopes]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        description: {type: string, maxLength: 500}
+        scopes: {$ref: '#/components/schemas/ServiceAccountScopes'}
+    UpdateServiceAccountRequest:
+      description: Partial workload-identity update; omitted fields remain unchanged. Empty updates are rejected.
       type: object
-      required: [uid, name, prefix, status, created_at]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        description: {type: string, maxLength: 500}
+        status: {type: string, enum: [active, disabled]}
+        scopes: {$ref: '#/components/schemas/ServiceAccountScopes'}
+    ServiceAccountScopes:
+      description: Complete effective capability set read on every service-credential request. Values are stable public protocol names.
+      type: array
+      minItems: 1
+      maxItems: 6
+      uniqueItems: true
+      items: {type: string, enum: [project_users.read, project_users.write, authentication.perform, sessions.manage, support_cases.read, support_cases.write]}
+    ServiceAccount:
+      description: Stable Project workload identity. Secret-bearing credential versions are nested resources and never appear in this representation.
+      type: object
+      required: [uid, name, description, status, scopes, environment, version, created_at, updated_at]
       properties:
         uid: {$ref: '#/components/schemas/Uuid'}
         name: {type: string}
-        prefix: {type: string}
-        status: {type: string, enum: [active, revoked]}
+        description: {type: string}
+        status: {type: string, enum: [active, disabled]}
+        scopes: {$ref: '#/components/schemas/ServiceAccountScopes'}
+        environment: {type: string, enum: [sandbox, production]}
+        version: {type: integer, format: int64, minimum: 1}
+        created_by_member_uid: {type: string, format: uuid, nullable: true}
         created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        disabled_at: {type: string, format: date-time, nullable: true}
+    ServiceAccountPage:
+      description: Cursor-paginated Project service-account collection.
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ServiceAccount'}}
+        next_cursor: {type: string, nullable: true}
+    CreateServiceCredentialRequest:
+      description: Human deployment label and optional expiry for a newly issued credential version. Omitted expiry defaults to 90 days.
+      type: object
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 100}
+        expires_at: {type: string, format: date-time}
+    ServiceCredential:
+      description: Safe metadata for one expiring service-account credential; reusable secret material is absent.
+      type: object
+      required: [uid, service_account_uid, name, prefix, fingerprint, status, created_at, expires_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        service_account_uid: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        prefix: {type: string}
+        fingerprint: {type: string, pattern: '^sha256:[0-9a-f]{24}$'}
+        status: {type: string, enum: [active, expired, revoked]}
+        created_by_member_uid: {type: string, format: uuid, nullable: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        expires_at: {$ref: '#/components/schemas/Timestamp'}
         last_used_at: {type: string, format: date-time, nullable: true}
         revoked_at: {type: string, format: date-time, nullable: true}
-    ApiKeySecret:
-      description: Project API key metadata plus the one-time secret returned only at creation or rotation.
+        revoked_by_member_uid: {type: string, format: uuid, nullable: true}
+        revocation_reason: {type: string, nullable: true}
+    ServiceCredentialSecret:
+      description: Credential metadata plus the reusable secret returned only by an exact issuance response or its bounded idempotent replay.
       allOf:
-        - {$ref: '#/components/schemas/ApiKey'}
+        - {$ref: '#/components/schemas/ServiceCredential'}
         - {type: object, required: [secret], properties: {secret: {type: string, writeOnly: true}}}
+    ServiceCredentialList:
+      description: One cursor-paginated page of credential history for one service account.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ServiceCredential'}}
+        next_cursor: {type: string, nullable: true}
+    SupportCaseCategory:
+      description: Stable customer-intent category selected independently from operator priority and lifecycle state.
+      type: string
+      enum: [bug, feedback, question]
+    SupportCaseStatus:
+      description: Support workflow state. Open work may progress or wait for the customer; resolved and closed cases must be reopened before new content is accepted.
+      type: string
+      enum: [open, in_progress, waiting_for_customer, resolved, closed]
+    SupportCasePriority:
+      description: Tenant-operator triage priority; Project service credentials cannot set or change it.
+      type: string
+      enum: [low, normal, high, urgent]
+    SupportReporter:
+      description: Durable attribution for the reported customer identity or actual workload/human actor. A service account may submit content on behalf of a same-Project user while remaining separately audit-attributed.
+      type: object
+      required: [type, uid]
+      properties:
+        type: {type: string, enum: [tenant_member, project_user, service_account, system]}
+        uid: {$ref: '#/components/schemas/Uuid'}
+    SupportDiagnostics:
+      description: Explicitly consented, allowlisted diagnostic snapshot. Current URLs prohibit credentials, query strings, and fragments so bearer material is not accidentally collected.
+      type: object
+      additionalProperties: false
+      properties:
+        application_version: {type: string, maxLength: 100}
+        platform: {type: string, maxLength: 100}
+        locale: {type: string, maxLength: 32}
+        timezone: {type: string, maxLength: 64}
+        current_url: {type: string, format: uri, maxLength: 2048}
+        request_id: {type: string, maxLength: 255}
+        occurred_at: {$ref: '#/components/schemas/Timestamp'}
+    CreateSupportCaseRequest:
+      description: New customer question, feedback item, or bug report plus its immutable initial message. Console operators may select a Project and priority; service credentials are bound to their own Project and cannot set priority.
+      type: object
+      required: [category, subject, message, diagnostic_consent]
+      properties:
+        project_uid: {allOf: [{$ref: '#/components/schemas/Uuid'}], description: Console-selected Tenant Project. A service credential may omit it or repeat only its own Project.}
+        category: {$ref: '#/components/schemas/SupportCaseCategory'}
+        subject: {type: string, minLength: 1, maxLength: 200}
+        message: {type: string, minLength: 1, maxLength: 10000}
+        priority: {$ref: '#/components/schemas/SupportCasePriority'}
+        reporter_project_user_uid: {allOf: [{$ref: '#/components/schemas/Uuid'}], description: Optional reporter attribution to a Project User in the selected or credential-bound Project.}
+        diagnostic_consent: {type: boolean}
+        diagnostics: {$ref: '#/components/schemas/SupportDiagnostics'}
+    UpdateSupportCaseRequest:
+      description: Partial ETag-guarded case update. Console operators may use every field; service credentials may supply only status `open` or `closed`. Null assignee clears assignment.
+      type: object
+      minProperties: 1
+      properties:
+        subject: {type: string, minLength: 1, maxLength: 200}
+        category: {$ref: '#/components/schemas/SupportCaseCategory'}
+        status: {$ref: '#/components/schemas/SupportCaseStatus'}
+        priority: {$ref: '#/components/schemas/SupportCasePriority'}
+        assignee_member_uid: {type: string, format: uuid, nullable: true}
+    SupportCase:
+      description: Tenant-owned support workflow aggregate. Sensitive text is encrypted at rest; structured routing, lifecycle, counts, timestamps, and opaque identifiers remain queryable.
+      type: object
+      required: [uid, reference, tenant_uid, category, subject, status, priority, reporter, diagnostic_consent, version, message_count, attachment_count, attachment_bytes, created_at, updated_at, last_message_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        reference: {type: string, pattern: '^SC-[A-Z0-9]{12}$'}
+        tenant_uid: {$ref: '#/components/schemas/Uuid'}
+        project_uid: {type: string, format: uuid, nullable: true}
+        category: {$ref: '#/components/schemas/SupportCaseCategory'}
+        subject: {type: string}
+        status: {$ref: '#/components/schemas/SupportCaseStatus'}
+        priority: {$ref: '#/components/schemas/SupportCasePriority'}
+        reporter: {$ref: '#/components/schemas/SupportReporter'}
+        assignee_member_uid: {type: string, format: uuid, nullable: true}
+        diagnostic_consent: {type: boolean}
+        diagnostics: {$ref: '#/components/schemas/SupportDiagnostics'}
+        version: {type: integer, format: int64, minimum: 1}
+        message_count: {type: integer, minimum: 1}
+        attachment_count: {type: integer, minimum: 0}
+        attachment_bytes: {type: integer, format: int64, minimum: 0}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        last_message_at: {$ref: '#/components/schemas/Timestamp'}
+        resolved_at: {type: string, format: date-time, nullable: true}
+        closed_at: {type: string, format: date-time, nullable: true}
+        retention_until: {type: string, format: date-time, nullable: true}
+    SupportCasePage:
+      description: Cursor-paginated Support Case inbox page.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SupportCase'}}
+        next_cursor: {type: string, nullable: true}
+    CreateSupportCaseMessageRequest:
+      description: Immutable public correspondence or console-only internal note. A service credential may attribute public content to a Project User in its Project.
+      type: object
+      required: [body]
+      properties:
+        body: {type: string, minLength: 1, maxLength: 10000}
+        visibility: {type: string, enum: [public, internal], default: public}
+        author_project_user_uid: {$ref: '#/components/schemas/Uuid'}
+    SupportCaseMessage:
+      description: Decrypted immutable case correspondence returned only after access and visibility checks.
+      type: object
+      required: [uid, case_uid, author, visibility, body, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        case_uid: {$ref: '#/components/schemas/Uuid'}
+        author: {$ref: '#/components/schemas/SupportReporter'}
+        visibility: {type: string, enum: [public, internal]}
+        body: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    SupportCaseMessagePage:
+      description: Cursor-paginated immutable message page in ascending creation order.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SupportCaseMessage'}}
+        next_cursor: {type: string, nullable: true}
+    CreateSupportCaseAttachmentRequest:
+      description: Multipart attachment upload. The optional represented uploader is accepted only from a service credential and must belong to its Project.
+      type: object
+      required: [file]
+      properties:
+        file: {type: string, format: binary}
+        uploader_project_user_uid: {$ref: '#/components/schemas/Uuid'}
+    SupportCaseAttachment:
+      description: Safe metadata for encrypted customer-supplied content. The SHA-256 digest supports incident coordination and integrity checks, not authentication.
+      type: object
+      required: [uid, case_uid, filename, media_type, byte_count, sha256, uploaded_by, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        case_uid: {$ref: '#/components/schemas/Uuid'}
+        filename: {type: string}
+        media_type: {type: string}
+        byte_count: {type: integer, minimum: 1, maximum: 5242880}
+        sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        uploaded_by: {$ref: '#/components/schemas/SupportReporter'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    SupportCaseAttachmentPage:
+      description: Cursor-paginated encrypted-attachment metadata page.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SupportCaseAttachment'}}
+        next_cursor: {type: string, nullable: true}
+    CreateSupportCaseExternalReferenceRequest:
+      description: Generic operator-managed link to one external system record. Identifiers and URLs are encrypted and never copied into case-event or audit metadata.
+      type: object
+      required: [provider, external_id]
+      properties:
+        provider: {type: string, pattern: '^[a-z][a-z0-9._-]{0,62}$'}
+        external_id: {type: string, minLength: 1, maxLength: 255}
+        url: {type: string, format: uri, maxLength: 2048}
+        label: {type: string, maxLength: 100}
+    SupportCaseExternalReference:
+      description: Decrypted operator-only external-record link. It is coordination metadata, not a source of authorization or case lifecycle state.
+      type: object
+      required: [uid, case_uid, provider, external_id, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        case_uid: {$ref: '#/components/schemas/Uuid'}
+        provider: {type: string}
+        external_id: {type: string}
+        url: {type: string, format: uri}
+        label: {type: string}
+        created_by_member_uid: {type: string, format: uuid, nullable: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    SupportCaseExternalReferencePage:
+      description: Cursor-paginated operator-only external-reference page.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SupportCaseExternalReference'}}
+        next_cursor: {type: string, nullable: true}
+    SupportCaseEvent:
+      description: Immutable safe lifecycle fact. Payloads contain routing identifiers and before/after states only, never encrypted customer content or external identifiers.
+      type: object
+      required: [uid, case_uid, type, actor, visibility, payload, created_at]
+      properties:
+        uid: {$ref: '#/components/schemas/Uuid'}
+        case_uid: {$ref: '#/components/schemas/Uuid'}
+        type: {type: string}
+        actor: {$ref: '#/components/schemas/SupportReporter'}
+        visibility: {type: string, enum: [public, internal]}
+        payload: {type: object, additionalProperties: true}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    SupportCaseEventPage:
+      description: Cursor-paginated append-only Support Case event page in ascending creation order.
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/SupportCaseEvent'}}
+        next_cursor: {type: string, nullable: true}
     CreateProjectUserRequest:
       description: Fields used to provision a Project-scoped application identity.
       type: object
@@ -869,7 +2835,7 @@ components:
       properties:
         uid: {$ref: '#/components/schemas/Uuid'}
         action: {type: string}
-        actor_type: {type: string, enum: [tenant_member, project_user, api_key, system]}
+        actor_type: {type: string, enum: [tenant_member, project_user, service_account, system]}
         actor_uid: {type: string, format: uuid, nullable: true}
         target_type: {type: string, nullable: true}
         target_uid: {type: string, format: uuid, nullable: true}

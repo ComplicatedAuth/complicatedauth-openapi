@@ -11,7 +11,7 @@ npm run bundle
 
 `openapi.yaml` is the source of truth. The two health operations explicitly opt
 out of global console-cookie authentication; runtime and project-user
-operations declare project API-key authentication per operation. The servers
+operations declare scoped Project service-credential authentication per operation. The servers
 list intentionally contains only the same-origin console proxy and local API
 until a production hostname is assigned.
 

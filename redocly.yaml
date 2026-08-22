@@ -4,7 +4,9 @@ rules:
   no-server-example.com: off
   security-defined: error
   operation-operationId-unique: error
-  operation-2xx-response: error
+  # OAuth authorization succeeds with a trusted 303 redirect. The authored
+  # documentation checker enforces at least one 2xx or 3xx response instead.
+  operation-2xx-response: off
   operation-summary: off
   operation-4xx-response: off
   tag-description: off

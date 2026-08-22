@@ -27,6 +27,10 @@ for (const [path, pathItem] of Object.entries(document.paths ?? {})) {
         failures.push(`${label} is missing ${field}`);
       }
     }
+    const responseCodes = Object.keys(operation?.responses ?? {});
+    if (!responseCodes.some((code) => /^[23](?:\d{2}|XX)$/.test(code))) {
+      failures.push(`${label} has no declared 2xx or 3xx success response`);
+    }
   }
 }
 
