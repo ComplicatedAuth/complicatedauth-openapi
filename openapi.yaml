@@ -27,6 +27,8 @@ tags:
     description: Stable Project workload identities, their least-privilege scopes, and independently expiring backend credentials.
   - name: Support cases
     description: Tenant-owned customer questions, feedback, and bug reports with scoped Project intake, operator workflow, immutable correspondence, encrypted attachments, and generic external references.
+  - name: External integrations
+    description: Vendor-neutral delegated-access evaluation and durable support-delivery contracts for trusted external platforms.
   - name: Project users
     description: Application identities that exist only inside one Project.
   - name: Activity
@@ -898,6 +900,25 @@ paths:
         '401': {$ref: '#/components/responses/OAuthError'}
         '422': {$ref: '#/components/responses/Error'}
         '503': {$ref: '#/components/responses/Error'}
+  /v1/access/evaluations:
+    post:
+      tags: [External integrations]
+      operationId: createAccessEvaluation
+      security: [{oauthAccessToken: []}]
+      summary: Evaluate an authenticated delegated identity
+      description: Derives the customer identity, Tenant, audience, grants, policy version, and validity boundary exclusively from the live resource-bound OAuth access token. External platforms retain exact idempotent results for at least ten minutes and cannot supply or override identity in the request body.
+      parameters: [{$ref: '#/components/parameters/AccessEvaluationIdempotencyKey'}, {$ref: '#/components/parameters/DokoSokoRequestId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AccessEvaluationRequest'}}}
+      responses:
+        '200': {description: Current delegated grants and their explicit validity boundary., content: {application/json: {schema: {$ref: '#/components/schemas/AccessEvaluation'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/OAuthError'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/projects:
     get:
       tags: [Projects]
@@ -1075,6 +1096,26 @@ paths:
       responses:
         '204': {description: Credential is revoked}
         '404': {$ref: '#/components/responses/Error'}
+  /v1/support-submissions:
+    post:
+      tags: [External integrations]
+      operationId: createSupportSubmission
+      summary: Accept one consented external support submission
+      description: Accepts at-least-once backend delivery from a trusted external platform, confines it to the service credential's Project, creates an encrypted Support Case, and retains exact idempotent results for at least 24 hours. Reusing a submission key with different content returns 409.
+      security: [{serviceCredential: []}]
+      parameters: [{$ref: '#/components/parameters/SupportSubmissionIdempotencyKey'}, {$ref: '#/components/parameters/DokoSokoRequestId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SupportSubmissionRequest'}}}
+      responses:
+        '202': {description: Submission accepted and converted into a Support Case., content: {application/json: {schema: {$ref: '#/components/schemas/SupportSubmissionReceipt'}}}}
+        '400': {$ref: '#/components/responses/Error'}
+        '401': {$ref: '#/components/responses/Error'}
+        '403': {$ref: '#/components/responses/Error'}
+        '409': {$ref: '#/components/responses/Error'}
+        '422': {$ref: '#/components/responses/Error'}
+        '429': {$ref: '#/components/responses/Error'}
+        '503': {$ref: '#/components/responses/Error'}
   /v1/support/cases:
     get:
       tags: [Support cases]
@@ -1631,6 +1672,24 @@ components:
       required: true
       description: Opaque caller-generated key for one logical mutation. Reuse it only with identical inputs for documented retries; maximum length is 255 characters.
       schema: {type: string, minLength: 1, maxLength: 255}
+    AccessEvaluationIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable for retries of one delegated-access evaluation and unique for the next evaluation. ComplicatedAuth retains the exact result for at least ten minutes.
+      schema: {type: string, pattern: '^aeval_[a-f0-9]{32}$'}
+    SupportSubmissionIdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Stable external identifier for one logical support submission and its at-least-once delivery retries.
+      schema: {type: string, minLength: 16, maxLength: 200}
+    DokoSokoRequestId:
+      name: X-DokoSoko-Request-ID
+      in: header
+      required: true
+      description: Unique identifier for one DokoSoko HTTP attempt; retries use a new value and idempotency does not depend on it.
+      schema: {type: string, pattern: '^req_[a-f0-9]{32}$'}
     IfMatch:
       name: If-Match
       in: header
@@ -2141,6 +2200,20 @@ components:
         policy_version: {type: string, pattern: '^scope-v1:[1-9][0-9]*$'}
         valid_until: {$ref: '#/components/schemas/Timestamp'}
         denial_reason: {type: string, enum: [missing_capability, unknown_operation], nullable: true}
+    AccessEvaluationRequest:
+      description: Deliberately empty input; all identity and authorization context comes from the authenticated resource-bound OAuth token.
+      type: object
+      additionalProperties: false
+      properties: {}
+    AccessEvaluation:
+      description: Idempotent snapshot of current delegated grants whose lifetime never exceeds the authenticated OAuth access token.
+      type: object
+      required: [id, grants, expires_at]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 200}
+        grants: {type: array, maxItems: 500, uniqueItems: true, items: {type: string, pattern: '^[a-z][a-z0-9_.:-]{0,127}$'}}
+        expires_at: {allOf: [{$ref: '#/components/schemas/Timestamp'}], description: Evaluation validity boundary; an external platform must not issue a longer-lived token.}
+        policy_version: {type: string, maxLength: 200}
     SignupRequest:
       description: Tenant and first-owner fields accepted during management-console signup.
       type: object
@@ -2512,6 +2585,118 @@ components:
       description: Tenant-operator triage priority; Project service credentials cannot set or change it.
       type: string
       enum: [low, normal, high, urgent]
+    SupportSubmissionRequest:
+      description: Durable external support-delivery envelope whose submission identifier also serves as its idempotency key.
+      type: object
+      additionalProperties: false
+      required: [submission_id, created_at, submission]
+      properties:
+        submission_id: {type: string, minLength: 1, maxLength: 200}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        submission: {$ref: '#/components/schemas/ExternalSupportSubmission'}
+    ExternalSupportSubmission:
+      description: Versioned, consented bug or feedback report together with trusted identity, product, and optional integration context.
+      type: object
+      additionalProperties: false
+      required: [schema_version, kind, reporter, product, source, confirmed_at, request_id]
+      properties:
+        schema_version: {type: string, enum: ['2026-08-20']}
+        kind: {type: string, enum: [bug, feedback]}
+        bug: {$ref: '#/components/schemas/ExternalBugReport'}
+        feedback: {$ref: '#/components/schemas/ExternalFeedbackReport'}
+        reporter: {$ref: '#/components/schemas/ExternalReporterContext'}
+        product: {$ref: '#/components/schemas/ExternalProductContext'}
+        integration: {$ref: '#/components/schemas/ExternalIntegrationContext'}
+        source: {type: string, enum: [private_mcp]}
+        confirmed_at: {$ref: '#/components/schemas/Timestamp'}
+        request_id: {type: string, minLength: 1}
+    ExternalReporterContext:
+      description: Vendor-owned customer identity derived by the external platform from authenticated claims; contact fields require explicit allow_contact consent.
+      type: object
+      additionalProperties: false
+      required: [principal, allow_contact]
+      properties:
+        principal:
+          type: object
+          additionalProperties: false
+          required: [issuer, subject]
+          properties:
+            issuer: {type: string, format: uri}
+            subject: {type: string, minLength: 1}
+        display_name: {type: string, maxLength: 200}
+        email: {type: string, format: email, maxLength: 320}
+        external_customer_id: {type: string, maxLength: 200, description: ComplicatedAuth Tenant identifier derived from the authenticated identity.}
+        installation_id: {type: string, maxLength: 200}
+        allow_contact: {type: boolean}
+    ExternalProductContext:
+      description: Immutable external product/catalog context attached to the support report for routing and diagnosis.
+      type: object
+      additionalProperties: false
+      required: [product_id, product_name]
+      properties:
+        product_id: {type: string, minLength: 1}
+        product_name: {type: string, minLength: 1}
+        product_version_id: {type: string}
+        product_version: {type: string}
+        manifest_hash: {type: string}
+        catalog_revision: {type: integer, format: int64}
+        selection_source: {type: string}
+        environment_id: {type: string}
+        installation_id: {type: string}
+    ExternalIntegrationContext:
+      description: Published external integration revision and immutable snapshot active when the report was confirmed.
+      type: object
+      additionalProperties: false
+      required: [integration_id, family_key, version_key, display_name, lifecycle, revision]
+      properties:
+        integration_id: {type: string, minLength: 1}
+        family_key: {type: string, minLength: 1}
+        version_key: {type: string, minLength: 1}
+        display_name: {type: string, minLength: 1}
+        lifecycle: {type: string, minLength: 1}
+        revision: {type: integer, format: int64, minimum: 1}
+        manifest_hash: {type: string}
+        snapshot: {type: object, additionalProperties: true, description: Immutable published integration revision snapshot.}
+    ExternalBugReport:
+      description: Structured external bug report; kind `bug` requires this object and forbids feedback.
+      type: object
+      additionalProperties: false
+      required: [summary, description]
+      properties:
+        summary: {type: string, minLength: 1, maxLength: 160}
+        description: {type: string, minLength: 1, maxLength: 10000}
+        reproduction_steps: {type: array, maxItems: 20, items: {type: string, minLength: 1, maxLength: 1000}}
+        expected_behavior: {type: string, maxLength: 4000}
+        actual_behavior: {type: string, maxLength: 4000}
+        error_code: {type: string, maxLength: 120}
+        error_message: {type: string, maxLength: 8000}
+        stack_trace: {type: string, maxLength: 16000}
+        diagnostic_context: {type: string, maxLength: 20000}
+        related_tool: {type: string, maxLength: 160}
+        integration_run_id: {type: string, maxLength: 160}
+        severity: {type: string, enum: [unknown, low, medium, high, critical]}
+        allow_contact: {type: boolean}
+    ExternalFeedbackReport:
+      description: Structured external feedback report; kind `feedback` requires this object and forbids a bug report.
+      type: object
+      additionalProperties: false
+      required: [message]
+      properties:
+        message: {type: string, minLength: 1, maxLength: 10000}
+        category: {type: string, enum: [general, usability, documentation, performance, feature_request, other]}
+        rating: {type: integer, minimum: 1, maximum: 5}
+        related_tool: {type: string, maxLength: 160}
+        integration_run_id: {type: string, maxLength: 160}
+        allow_contact: {type: boolean}
+    SupportSubmissionReceipt:
+      description: Synchronous acknowledgement that identifies the created Support Case; unknown additive response fields may be ignored by external platforms.
+      type: object
+      required: [id, status]
+      properties:
+        id: {type: string, minLength: 1, maxLength: 200}
+        status: {type: string, enum: [accepted]}
+        external_id: {type: string, maxLength: 200}
+        external_url: {type: string, format: uri, pattern: '^https://', maxLength: 2000}
     SupportReporter:
       description: Durable attribution for the reported customer identity or actual workload/human actor. A service account may submit content on behalf of a same-Project user while remaining separately audit-attributed.
       type: object
