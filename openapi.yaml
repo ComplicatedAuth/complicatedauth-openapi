@@ -907,7 +907,7 @@ paths:
       security: [{oauthAccessToken: []}]
       summary: Evaluate an authenticated delegated identity
       description: Derives the customer identity, Tenant, audience, grants, policy version, and validity boundary exclusively from the live resource-bound OAuth access token. External platforms retain exact idempotent results for at least ten minutes and cannot supply or override identity in the request body.
-      parameters: [{$ref: '#/components/parameters/AccessEvaluationIdempotencyKey'}, {$ref: '#/components/parameters/DokoSokoRequestId'}]
+      parameters: [{$ref: '#/components/parameters/AccessEvaluationIdempotencyKey'}, {$ref: '#/components/parameters/ExternalRequestId'}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/AccessEvaluationRequest'}}}
@@ -1103,7 +1103,7 @@ paths:
       summary: Accept one consented external support submission
       description: Accepts at-least-once backend delivery from a trusted external platform, confines it to the service credential's Project, creates an encrypted Support Case, and retains exact idempotent results for at least 24 hours. Reusing a submission key with different content returns 409.
       security: [{serviceCredential: []}]
-      parameters: [{$ref: '#/components/parameters/SupportSubmissionIdempotencyKey'}, {$ref: '#/components/parameters/DokoSokoRequestId'}]
+      parameters: [{$ref: '#/components/parameters/SupportSubmissionIdempotencyKey'}, {$ref: '#/components/parameters/ExternalRequestId'}]
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/SupportSubmissionRequest'}}}
@@ -1684,11 +1684,11 @@ components:
       required: true
       description: Stable external identifier for one logical support submission and its at-least-once delivery retries.
       schema: {type: string, minLength: 16, maxLength: 200}
-    DokoSokoRequestId:
-      name: X-DokoSoko-Request-ID
+    ExternalRequestId:
+      name: X-External-Request-ID
       in: header
       required: true
-      description: Unique identifier for one DokoSoko HTTP attempt; retries use a new value and idempotency does not depend on it.
+      description: Provider-neutral identifier for one external-platform HTTP attempt; retries use a new value and idempotency does not depend on it.
       schema: {type: string, pattern: '^req_[a-f0-9]{32}$'}
     IfMatch:
       name: If-Match
