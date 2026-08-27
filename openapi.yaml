@@ -238,7 +238,7 @@ paths:
       operationId: createInitialTenantMemberWebAuthnRegistrationCeremony
       security: []
       summary: Start initial Tenant Member WebAuthn enrollment
-      description: Creates a registration ceremony only after password verification and only while the Tenant Member has no WebAuthn credential. Passkeys require discoverability and user verification; security keys additionally request direct attestation.
+      description: Creates a platform-passkey registration ceremony only after password verification and only while the Tenant Member has no WebAuthn credential. The passkey must be discoverable and user verified. Its display metadata is derived from the verified authenticator AAGUID, so callers do not supply a name.
       parameters: [{$ref: '#/components/parameters/Origin'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnRegistrationRequest'}}}}
       responses:
@@ -385,7 +385,7 @@ paths:
       tags: [Console authentication]
       operationId: createTenantMemberWebAuthnRegistrationCeremony
       summary: Start management WebAuthn credential enrollment
-      description: Creates a five-minute registration ceremony for the current Tenant Member. A bootstrap session may use it only to establish the first credential; a strong session may add a replacement before deleting an old credential. Already-enrolled credential identifiers are supplied in `excludeCredentials`, preventing the same authenticator from silently replacing a discoverable credential that the server still trusts. Ten credentials are allowed at most.
+      description: Creates a five-minute platform-passkey registration ceremony for the current Tenant Member. A bootstrap session may use it only to establish the first credential; a strong session may add a replacement before deleting an old credential. Already-enrolled credential identifiers are supplied in `excludeCredentials`, preventing the same authenticator from silently replacing a discoverable credential that the server still trusts. Display metadata is derived from the verified authenticator AAGUID, and ten credentials are allowed at most.
       parameters: [{$ref: '#/components/parameters/Origin'}]
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TenantMemberWebAuthnRegistrationRequest'}}}}
       responses:
@@ -2361,12 +2361,11 @@ components:
       properties:
         mode: {type: string, enum: [passkey, security_key, hybrid]}
     TenantMemberWebAuthnRegistrationRequest:
-      description: Human label and authenticator category for a management WebAuthn credential.
+      description: Fixed authenticator category for management passkey enrollment. The server derives authenticator identity from the verified AAGUID.
       type: object
-      required: [name, mode]
+      required: [mode]
       properties:
-        name: {type: string, minLength: 1, maxLength: 100}
-        mode: {type: string, enum: [passkey, security_key]}
+        mode: {type: string, enum: [passkey]}
     TenantMemberWebAuthnCeremony:
       description: Five-minute, single-use management WebAuthn ceremony and browser-compatible PublicKeyCredential options.
       type: object
@@ -2384,12 +2383,13 @@ components:
         ceremony_uid: {$ref: '#/components/schemas/Uuid'}
         credential: {type: object, additionalProperties: true}
     TenantMemberWebAuthnCredential:
-      description: Safe, versioned metadata for one management passkey or attested security key. Authenticator identifiers, public keys, and counters remain internal.
+      description: Safe, versioned metadata for one management passkey or legacy security key. The AAGUID identifies display metadata only; public keys, credential identifiers, and counters remain internal.
       type: object
-      required: [uid, name, kind, attested, version, created_at, updated_at]
+      required: [uid, name, aaguid, kind, attested, version, created_at, updated_at]
       properties:
         uid: {$ref: '#/components/schemas/Uuid'}
         name: {type: string}
+        aaguid: {type: string, format: uuid}
         kind: {type: string, enum: [passkey, security_key]}
         attested: {type: boolean}
         version: {type: integer, format: int64, minimum: 1}
